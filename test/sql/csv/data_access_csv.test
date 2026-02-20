@@ -1,0 +1,50 @@
+# name: test/sql/csv/data_access_csv.test
+# description: Test accessing CSV data via Hive Metastore
+# group: [csv]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.orders;
+----
+200
+
+query I
+SELECT COUNT(DISTINCT status) FROM hms.sample_db.orders;
+----
+4
+
+statement ok
+SELECT * FROM hms.sample_db.orders LIMIT 5;
+
+# Test filtering on CSV table
+# Statuses cycle through 4 types for 200 orders: 50 of each status
+query I
+SELECT COUNT(*) FROM hms.sample_db.orders WHERE status = 'pending';
+----
+50
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.orders WHERE status = 'delivered';
+----
+50
+
+# Test specific order data (order_id 1: customer 1, product 1, quantity 1, amount 10.0)
+query IIIIR
+SELECT customer_id, product_id, quantity, total_amount, status FROM hms.sample_db.orders WHERE order_id = 1;
+----
+1
+1
+1
+10.0
+pending

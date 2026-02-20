@@ -1,0 +1,222 @@
+# name: test/sql/hive/test_multi_partitioning.test
+# description: Test table with multiple partition columns
+# group: [hive]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test that multiple partition columns are correctly typed
+# Table is partitioned by year (INTEGER), month (INTEGER), region (VARCHAR)
+# Note: Hive stores partition columns at the end in alphabetical order (month, region, year)
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.multi_partition;
+----
+event_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+status
+VARCHAR
+YES
+NULL
+NULL
+NULL
+value
+DOUBLE
+YES
+NULL
+NULL
+NULL
+event_timestamp
+TIMESTAMP
+YES
+NULL
+NULL
+NULL
+month
+INTEGER
+YES
+NULL
+NULL
+NULL
+region
+VARCHAR
+YES
+NULL
+NULL
+NULL
+year
+INTEGER
+YES
+NULL
+NULL
+NULL
+
+# Test querying data with multiple partition columns
+query IIITTRT
+SELECT event_id, year, month, region, status, value, event_timestamp
+FROM hms.sample_db.multi_partition
+ORDER BY event_id
+LIMIT 10;
+----
+1	2020	1	North	pending	100	2020-01-01 12:00:00
+2	2020	2	South	completed	200	2020-02-01 12:00:00
+3	2020	3	East	cancelled	300	2020-03-01 12:00:00
+4	2020	4	West	pending	400	2020-04-01 12:00:00
+5	2020	5	North	completed	500	2020-05-01 12:00:00
+6	2020	6	South	cancelled	600	2020-06-01 12:00:00
+7	2020	7	East	pending	700	2020-07-01 12:00:00
+8	2020	8	West	completed	800	2020-08-01 12:00:00
+9	2020	9	North	cancelled	900	2020-09-01 12:00:00
+10	2020	10	South	pending	1000	2020-10-01 12:00:00
+
+# Test distinct values for INTEGER partition columns
+query II
+SELECT DISTINCT year, month
+FROM hms.sample_db.multi_partition
+ORDER BY year, month;
+----
+2020	1
+2020	2
+2020	3
+2020	4
+2020	5
+2020	6
+2020	7
+2020	8
+2020	9
+2020	10
+2020	11
+2020	12
+2021	1
+2021	2
+2021	3
+2021	4
+2021	5
+2021	6
+2021	7
+2021	8
+2021	9
+2021	10
+2021	11
+2021	12
+2022	1
+2022	2
+2022	3
+2022	4
+2022	5
+2022	6
+2022	7
+2022	8
+2022	9
+2022	10
+2022	11
+2022	12
+2023	1
+2023	2
+2023	3
+2023	4
+2023	5
+2023	6
+2023	7
+2023	8
+2023	9
+2023	10
+2023	11
+2023	12
+2024	1
+2024	2
+2024	3
+2024	4
+2024	5
+2024	6
+2024	7
+2024	8
+2024	9
+2024	10
+2024	11
+2024	12
+
+# Test GROUP BY on multiple partition columns
+query IIIT
+SELECT year, month, region, COUNT(*) as count
+FROM hms.sample_db.multi_partition
+GROUP BY year, month, region
+ORDER BY year, month, region
+LIMIT 10;
+----
+2020	1	North	1
+2020	2	South	1
+2020	3	East	1
+2020	4	West	1
+2020	5	North	1
+2020	6	South	1
+2020	7	East	1
+2020	8	West	1
+2020	9	North	1
+2020	10	South	1
+
+# Test filter on INTEGER partition columns
+query I
+SELECT COUNT(*) FROM hms.sample_db.multi_partition WHERE year = 2021 AND month = 6;
+----
+1
+
+# Test filter on VARCHAR partition column
+query I
+SELECT COUNT(*) FROM hms.sample_db.multi_partition WHERE region = 'North';
+----
+15
+
+# Test aggregation with partition column filters
+query R
+SELECT SUM(value) FROM hms.sample_db.multi_partition WHERE year = 2020;
+----
+7800
+
+# Test that all partition columns are correctly typed
+# year should be INTEGER, not BIGINT
+# month should be INTEGER, not BIGINT
+# region should be VARCHAR, not STRING
+query III
+SELECT typeof(year), typeof(month), typeof(region)
+FROM hms.sample_db.multi_partition
+LIMIT 1;
+----
+INTEGER	INTEGER	VARCHAR
+
+# Test COUNT(DISTINCT) on partition columns
+query III
+SELECT COUNT(DISTINCT year) as years, COUNT(DISTINCT month) as months, COUNT(DISTINCT region) as regions
+FROM hms.sample_db.multi_partition;
+----
+5	12	4
+
+# Test ORDER BY partition columns
+query IIIT
+SELECT year, month, region, status
+FROM hms.sample_db.multi_partition
+ORDER BY year DESC, month DESC, region ASC
+LIMIT 10;
+----
+2024	12	West	cancelled
+2024	11	East	completed
+2024	10	South	pending
+2024	9	North	cancelled
+2024	8	West	completed
+2024	7	East	pending
+2024	6	South	cancelled
+2024	5	North	completed
+2024	4	West	pending
+2024	3	East	cancelled

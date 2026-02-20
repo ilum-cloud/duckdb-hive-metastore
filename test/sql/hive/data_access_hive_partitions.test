@@ -1,0 +1,48 @@
+# name: test/sql/hive/data_access_hive_partitions.test
+# description: Test accessing data from Hive partitions
+# group: [hive]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews;
+----
+150
+
+query I
+SELECT COUNT(DISTINCT rating) FROM hms.sample_db.reviews;
+----
+5
+
+statement ok
+SELECT * FROM hms.sample_db.reviews LIMIT 5;
+
+# Test partition pruning (rating is partition column)
+# Ratings cycle 1-5 for 150 reviews: 30 of each rating
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews WHERE rating = 5;
+----
+30
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews WHERE rating = 1;
+----
+30
+
+# Test specific review (review_id 1: product 1, customer 1, rating 1)
+query III
+SELECT product_id, customer_id, rating FROM hms.sample_db.reviews WHERE review_id = 1;
+----
+1
+1
+1

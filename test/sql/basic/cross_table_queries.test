@@ -1,0 +1,104 @@
+# name: test/sql/basic/cross_table_queries.test
+# description: Test cross-table queries between DuckDB and HMS
+# group: [basic]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+INSTALL iceberg; LOAD iceberg;
+
+statement ok
+INSTALL delta; LOAD delta;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test aggregations across different formats
+# All orders reference valid customers (cycling through 1-100)
+# 200 orders, each has a valid customer match = 200 join results
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers c 
+JOIN hms.sample_db.orders o ON c.customer_id = o.customer_id;
+----
+200
+
+# All orders reference valid products (cycling through 1-50)
+# 200 orders, each has a valid product match = 200 join results
+query I
+SELECT COUNT(*) FROM hms.sample_db.products p
+JOIN hms.sample_db.orders o ON p.product_id = o.product_id;
+----
+200
+
+# All reviews reference valid products (cycling through 1-50)
+# 150 reviews, each has a valid product match = 150 join results
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews r
+JOIN hms.sample_db.products p ON r.product_id = p.product_id;
+----
+150
+
+statement ok
+SET unsafe_enable_version_guessing = true;
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.inventory i 
+JOIN hms.sample_db.products p ON i.product_id = p.product_id;
+----
+75
+
+statement ok
+SET unsafe_enable_version_guessing = false;
+
+# Test cross-format GROUP BY
+statement ok
+SELECT c.country, COUNT(o.order_id) as order_count
+FROM hms.sample_db.customers c
+LEFT JOIN hms.sample_db.orders o ON c.customer_id = o.customer_id
+GROUP BY c.country
+ORDER BY order_count DESC;
+
+# Test cross-format complex query
+statement ok
+SELECT 
+    p.category,
+    COUNT(DISTINCT o.order_id) as num_orders,
+    SUM(o.total_amount) as total_revenue,
+    AVG(r.rating) as avg_rating
+FROM hms.sample_db.products p
+LEFT JOIN hms.sample_db.orders o ON p.product_id = o.product_id
+LEFT JOIN hms.sample_db.reviews r ON p.product_id = r.product_id
+GROUP BY p.category
+ORDER BY total_revenue DESC;
+
+# Test mixed local and HMS tables
+statement ok
+CREATE TABLE local_discounts (
+    product_id INTEGER,
+    discount_percent DOUBLE
+);
+
+statement ok
+INSERT INTO local_discounts VALUES (1, 10.0), (2, 15.0), (3, 5.0);
+
+statement ok
+SELECT p.product_name, p.price, l.discount_percent,
+       p.price * (1 - l.discount_percent / 100) as discounted_price
+FROM hms.sample_db.products p
+JOIN local_discounts l ON p.product_id = l.product_id;
+
+statement ok
+DROP TABLE local_discounts;

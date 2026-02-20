@@ -1,0 +1,61 @@
+# name: test/sql/avro/describe_avro_table.test
+# description: Test describing Avro table from HMS
+# group: [avro]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.shipments;
+----
+shipment_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+order_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+carrier
+VARCHAR
+YES
+NULL
+NULL
+NULL
+tracking_number
+VARCHAR
+YES
+NULL
+NULL
+NULL
+status
+VARCHAR
+YES
+NULL
+NULL
+NULL
+ship_date
+INTEGER
+YES
+NULL
+NULL
+NULL

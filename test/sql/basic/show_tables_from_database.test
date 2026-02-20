@@ -1,0 +1,33 @@
+# name: test/sql/basic/show_tables_from_database.test
+# description: Test showing tables from a specific database in HMS
+# group: [basic]
+
+require hive_metastore
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Show available schemas in the HMS
+query T
+SELECT schema_name FROM information_schema.schemata WHERE catalog_name = 'hms';
+----
+default
+sample_db
+
+# Show all tables in the HMS
+query T
+SHOW TABLES FROM hms.default;
+----
+
+query T
+SHOW TABLES FROM hms.sample_db;
+----
+customers
+decimal_partitioned
+inventory
+multi_partition
+orders
+products
+reviews
+shipments
+type_test

@@ -1,0 +1,52 @@
+# name: test/sql/delta/describe_delta_table.test
+# description: Test describing a Delta table from HMS
+# group: [delta]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+INSTALL delta; LOAD delta;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.products;
+----
+product_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+product_name
+VARCHAR
+YES
+NULL
+NULL
+NULL
+category
+VARCHAR
+YES
+NULL
+NULL
+NULL
+price
+DOUBLE
+YES
+NULL
+NULL
+NULL
+stock_quantity
+INTEGER
+YES
+NULL
+NULL
+NULL

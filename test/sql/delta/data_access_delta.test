@@ -1,0 +1,53 @@
+# name: test/sql/delta/data_access_delta.test
+# description: Test data access on Delta Lake tables via HMS
+# group: [delta]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+INSTALL delta; LOAD delta;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.products;
+----
+50
+
+query I
+SELECT COUNT(DISTINCT category) FROM hms.sample_db.products;
+----
+6
+
+statement ok
+SELECT * FROM hms.sample_db.products LIMIT 5;
+
+# Test filtering on Delta table
+# Categories cycle through 6 types for 50 products
+# Electronics is index 0: products 1, 7, 13, 19, 25, 31, 37, 43, 49 = 9 products
+query I
+SELECT COUNT(*) FROM hms.sample_db.products WHERE category = 'Electronics';
+----
+9
+
+# Test specific product data (product_id 1: price = 10.0, stock = 100)
+query TRI
+SELECT product_name, price, stock_quantity FROM hms.sample_db.products WHERE product_id = 1;
+----
+Product 1
+10.0
+100
+
+# Test product with id 10 (price = 100.0, stock = 1000)
+query R
+SELECT price FROM hms.sample_db.products WHERE product_id = 10;
+----
+100.0

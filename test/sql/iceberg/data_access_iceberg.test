@@ -1,0 +1,69 @@
+# name: test/sql/iceberg/data_access_iceberg.test
+# description: Test data access for Iceberg tables via HMS
+# group: [iceberg]
+
+require hive_metastore
+
+require parquet
+
+require httpfs
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+INSTALL iceberg; LOAD iceberg;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# Attach HMS catalog
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Enable version guessing for Iceberg tables created by Spark
+# Spark's Iceberg integration with HMS doesn't create version-hint.text files,
+# so DuckDB needs to determine the latest version by examining metadata directory.
+# This is safe for read-only querying of production Iceberg tables.
+# See: https://duckdb.org/docs/extensions/iceberg
+statement ok
+SET unsafe_enable_version_guessing = true;
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.inventory;
+----
+75
+
+query I
+SELECT COUNT(*) FROM information_schema.columns 
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'inventory'
+AND column_name = 'inventory_id' AND data_type = 'INTEGER';
+----
+1
+
+query I
+SELECT COUNT(DISTINCT location) FROM hms.sample_db.inventory;
+----
+5
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.inventory WHERE product_id BETWEEN 1 AND 50;
+----
+75
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT location, SUM(quantity) as total_qty 
+    FROM hms.sample_db.inventory 
+    GROUP BY location
+) subq WHERE total_qty > 0;
+----
+5
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.inventory WHERE last_updated IS NOT NULL;
+----
+75

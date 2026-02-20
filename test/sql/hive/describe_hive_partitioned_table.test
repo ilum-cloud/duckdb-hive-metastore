@@ -1,0 +1,57 @@
+# name: test/sql/hive/describe_hive_partitioned_table.test
+# description: Test describing a Hive partitioned table from HMS
+# group: [hive]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test data access from partitioned Parquet format (reviews table)
+# Even though in the seeding rating is not the last column, hive stores partition columns at the end
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.reviews;
+----
+review_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+product_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+customer_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+review_text
+VARCHAR
+YES
+NULL
+NULL
+NULL
+review_date
+DATE
+YES
+NULL
+NULL
+NULL
+rating
+INTEGER
+YES
+NULL
+NULL
+NULL

@@ -1,0 +1,129 @@
+# name: test/sql/hive/test_decimal_partitioning.test
+# description: Test DECIMAL partition column type mapping (problematic type)
+# group: [hive]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test that DECIMAL partition columns are correctly typed (not BIGINT)
+# This was a bug where partition columns were inferred as BIGINT instead of using HMS schema
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.decimal_partitioned;
+----
+transaction_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+region
+VARCHAR
+YES
+NULL
+NULL
+NULL
+transaction_date
+DATE
+YES
+NULL
+NULL
+NULL
+description
+VARCHAR
+YES
+NULL
+NULL
+NULL
+amount
+DECIMAL(10,2)
+YES
+NULL
+NULL
+NULL
+
+# Test querying data with DECIMAL partition column
+query IRTT
+SELECT transaction_id, amount, region, transaction_date
+FROM hms.sample_db.decimal_partitioned
+ORDER BY transaction_id
+LIMIT 10;
+----
+1	10.99	North	2020-01-02
+2	11.98	South	2020-01-03
+3	12.97	East	2020-01-04
+4	13.96	West	2020-01-05
+5	14.95	North	2020-01-06
+6	15.94	South	2020-01-07
+7	16.93	East	2020-01-08
+8	17.92	West	2020-01-09
+9	18.91	North	2020-01-10
+10	19.9	South	2020-01-11
+
+# Test that partition values are DECIMAL, not BIGINT
+# This verifies the type mapping fix
+query R
+SELECT DISTINCT amount
+FROM hms.sample_db.decimal_partitioned
+ORDER BY amount
+LIMIT 10;
+----
+10.99
+11.98
+12.97
+13.96
+14.95
+15.94
+16.93
+17.92
+18.91
+19.9
+
+# Test aggregation on DECIMAL partition column
+query R
+SELECT SUM(amount) FROM hms.sample_db.decimal_partitioned;
+----
+1762.25
+
+# Test filter on DECIMAL partition column
+query I
+SELECT COUNT(*) FROM hms.sample_db.decimal_partitioned WHERE amount > 50.0;
+----
+10
+
+# Test GROUP BY on DECIMAL partition column
+query RI
+SELECT amount, COUNT(*) as count
+FROM hms.sample_db.decimal_partitioned
+GROUP BY amount
+ORDER BY amount
+LIMIT 5;
+----
+10.99	1
+11.98	1
+12.97	1
+13.96	1
+14.95	1
+
+# Test JOIN with DECIMAL partition column
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.decimal_partitioned t1
+JOIN hms.sample_db.decimal_partitioned t2 ON t1.amount = t2.amount
+WHERE t1.region != t2.region;
+----
+0
+
+# Test that DECIMAL precision is preserved (2 decimal places)
+query R
+SELECT AVG(amount) FROM hms.sample_db.decimal_partitioned;
+----
+35.245

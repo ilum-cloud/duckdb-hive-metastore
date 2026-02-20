@@ -1,0 +1,55 @@
+# name: test/sql/parquet/describe_parquet_table.test
+# description: Test describing a Parquet table from HMS
+# group: [parquet]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.customers;
+----
+customer_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+first_name
+VARCHAR
+YES
+NULL
+NULL
+NULL
+last_name
+VARCHAR
+YES
+NULL
+NULL
+NULL
+email
+VARCHAR
+YES
+NULL
+NULL
+NULL
+country
+VARCHAR
+YES
+NULL
+NULL
+NULL
+signup_date
+DATE
+YES
+NULL
+NULL
+NULL

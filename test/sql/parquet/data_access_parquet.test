@@ -1,0 +1,51 @@
+# name: test/sql/parquet/data_access_parquet.test
+# description: Test data access from Parquet files via HMS
+# group: [parquet]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test data access from Parquet format (customers table)
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers;
+----
+100
+
+query I
+SELECT COUNT(DISTINCT country) FROM hms.sample_db.customers;
+----
+8
+
+statement ok
+SELECT * FROM hms.sample_db.customers LIMIT 5;
+
+# Test filtering on Parquet table
+# Country distribution: cycling through 8 countries for 100 customers = 12 or 13 per country
+# USA is the first country (index 0), so customers 1, 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97 = 13 customers
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers WHERE country = 'USA';
+----
+13
+
+# Test specific customer data
+query TTTT
+SELECT customer_id, first_name, last_name, country FROM hms.sample_db.customers WHERE customer_id = 1;
+----
+1
+John
+Smith
+USA
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers WHERE first_name = 'John';
+----
+13

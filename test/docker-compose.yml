@@ -1,0 +1,123 @@
+services:
+  # PostgreSQL database for Hive Metastore
+  hive-metastore-postgresql:
+    image: postgres:18
+    container_name: hive-metastore-postgresql
+    environment:
+      - POSTGRES_DB=metastore
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  # S3 compatible storage using MinIO
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  
+  # Create test bucket in MinIO
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/test-bucket --ignore-existing;
+      mc anonymous set public myminio/test-bucket;
+      exit 0;
+      "
+  
+  # Hive Metastore service
+  hive-metastore:
+    image: ilum/hive:3.1.3
+    container_name: hive-metastore
+    environment:
+      DB_DRIVER: "postgres"
+      SERVICE_NAME: "metastore"
+    ports:
+      - "9083:9083"
+      - "10000:10000"
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+    depends_on:
+      hive-metastore-postgresql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Starting Hive schema check and initialization process..."
+        if schematool --verbose \
+                      -validate \
+                      -dbType postgres \
+                      -userName "hive" \
+                      -passWord "hive" \
+                      -url "jdbc:postgresql://hive-metastore-postgresql:5432/metastore"; then
+          echo "Schema already exists and is valid, skipping initialization"
+        else
+          echo "Schema missing or invalid, initializing..."
+          schematool --verbose \
+                    -initSchema \
+                    -dbType postgres \
+                    -userName "hive" \
+                    -passWord "hive" \
+                    -url "jdbc:postgresql://hive-metastore-postgresql:5432/metastore"
+        fi
+
+        exec hive --service metastore
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9083' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Spark container to seed the data into Hive Metastore
+  spark-seeder:
+    image: hive-metastore-test-spark-seeder:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: spark-seeder
+    mem_limit: 4g
+    environment:
+      - SPARK_LOCAL_DIRS=/tmp/spark
+      - _JAVA_OPTIONS=-Xmx3g
+    volumes:
+      - ./seed_hive_data_spark.py:/opt/spark/work-dir/seed_hive_data_spark.py:ro
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Seeding Hive Metastore with initial data using Spark..."
+        python3 /opt/spark/work-dir/seed_hive_data_spark.py 2>&1

@@ -1,0 +1,244 @@
+# name: test/sql/avro/data_access_avro.test
+# description: Test accessing Avro data via Hive Metastore
+# group: [avro]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.shipments;
+----
+80
+
+# Test schema of shipments table - ship_date is now INTEGER (days since epoch) due to Avro storage
+query IIITTI
+SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
+FROM hms.sample_db.shipments
+WHERE shipment_id = 1;
+----
+1	1	FedEx	TRK00000001	in_transit	19723
+
+# Test filtering by carrier
+query I
+SELECT COUNT(*) FROM hms.sample_db.shipments WHERE carrier = 'FedEx';
+----
+20
+
+# Test filtering by status
+query I
+SELECT COUNT(*) FROM hms.sample_db.shipments WHERE status = 'delivered';
+----
+27
+
+# Test filtering by status (in_transit)
+query I
+SELECT COUNT(*) FROM hms.sample_db.shipments WHERE status = 'in_transit';
+----
+27
+
+# Test filtering by status (delayed)
+query I
+SELECT COUNT(*) FROM hms.sample_db.shipments WHERE status = 'delayed';
+----
+26
+
+# Test GROUP BY carrier
+query IT
+SELECT carrier, COUNT(*) as count
+FROM hms.sample_db.shipments
+GROUP BY carrier
+ORDER BY carrier;
+----
+DHL	20
+FedEx	20
+UPS	20
+USPS	20
+
+# Test GROUP BY status
+query IT
+SELECT status, COUNT(*) as count
+FROM hms.sample_db.shipments
+GROUP BY status
+ORDER BY status;
+----
+delayed	26
+delivered	27
+in_transit	27
+
+# Test ORDER BY shipment_id
+query IIITTI
+SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
+FROM hms.sample_db.shipments
+ORDER BY shipment_id
+LIMIT 5;
+----
+1	1	FedEx	TRK00000001	in_transit	19723
+2	2	UPS	TRK00000002	delivered	19726
+3	3	DHL	TRK00000003	delayed	19729
+4	4	USPS	TRK00000004	in_transit	19732
+5	5	FedEx	TRK00000005	delivered	19735
+
+# Test ORDER BY ship_date DESC
+query ITI
+SELECT shipment_id, carrier, ship_date
+FROM hms.sample_db.shipments
+ORDER BY ship_date DESC
+LIMIT 3;
+----
+80	USPS	19960
+79	DHL	19957
+78	UPS	19954
+
+# Test filtering by order_id IN clause
+query ITT
+SELECT s.shipment_id, s.carrier, s.status
+FROM hms.sample_db.shipments s
+WHERE s.order_id IN (1, 2, 3, 4, 5)
+ORDER BY s.shipment_id
+LIMIT 5;
+----
+1	FedEx	in_transit
+2	UPS	delivered
+3	DHL	delayed
+4	USPS	in_transit
+5	FedEx	delivered
+
+# Test filtering by shipment_id range
+query II
+SELECT shipment_id, tracking_number
+FROM hms.sample_db.shipments
+WHERE shipment_id BETWEEN 1 AND 5
+ORDER BY shipment_id;
+----
+1	TRK00000001
+2	TRK00000002
+3	TRK00000003
+4	TRK00000004
+5	TRK00000005
+
+# Test DISTINCT carriers
+query I
+SELECT COUNT(DISTINCT carrier) FROM hms.sample_db.shipments;
+----
+4
+
+# Test DISTINCT statuses
+query I
+SELECT COUNT(DISTINCT status) FROM hms.sample_db.shipments;
+----
+3
+
+# Test MIN/MAX dates (as integers - days since epoch)
+query II
+SELECT MIN(ship_date) as min_date, MAX(ship_date) as max_date
+FROM hms.sample_db.shipments;
+----
+19723	19960
+
+# Test MIN/MAX shipment_id
+query II
+SELECT MIN(shipment_id) as min_id, MAX(shipment_id) as max_id
+FROM hms.sample_db.shipments;
+----
+1	80
+
+# Test filtering by multiple carriers
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE carrier IN ('FedEx', 'UPS');
+----
+40
+
+# Test filtering by carrier and status
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE carrier = 'FedEx' AND status = 'delivered';
+----
+7
+
+# Test aggregation with HAVING clause
+query IT
+SELECT carrier, COUNT(*) as count
+FROM hms.sample_db.shipments
+GROUP BY carrier
+HAVING COUNT(*) > 15
+ORDER BY carrier;
+----
+DHL	20
+FedEx	20
+UPS	20
+USPS	20
+
+# Test specific shipment details
+query IIITTI
+SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
+FROM hms.sample_db.shipments
+WHERE shipment_id = 50;
+----
+50	50	UPS	TRK00000050	delivered	19870
+
+# Test filtering by order_id range
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE order_id BETWEEN 10 AND 20;
+----
+11
+
+# Test selecting specific columns with WHERE clause
+query ITT
+SELECT shipment_id, carrier, status
+FROM hms.sample_db.shipments
+WHERE carrier = 'DHL' AND status = 'in_transit'
+ORDER BY shipment_id
+LIMIT 5;
+----
+7	DHL	in_transit
+19	DHL	in_transit
+31	DHL	in_transit
+43	DHL	in_transit
+55	DHL	in_transit
+
+# Test filtering by date range (using integer dates - days since epoch)
+# 19723 = 2024-01-01, 19754 = 2024-02-01
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE ship_date >= 19723 AND ship_date < 19754;
+----
+11
+
+# Test date comparison (using integer)
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE ship_date > 19813;
+----
+49
+
+# Test complex WHERE with multiple conditions
+query I
+SELECT COUNT(*)
+FROM hms.sample_db.shipments
+WHERE (carrier = 'FedEx' OR carrier = 'UPS')
+  AND status != 'cancelled'
+  AND ship_date >= 19723;
+----
+40

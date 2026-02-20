@@ -1,0 +1,16 @@
+# name: test/sql/basic/list_databases.test
+# description: Test listing databases from HMS
+# group: [basic]
+
+require hive_metastore
+
+# Connect to HMS
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# List databases
+query T
+SHOW DATABASES;
+----
+hms
+memory

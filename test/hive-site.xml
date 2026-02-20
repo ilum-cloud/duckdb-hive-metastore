@@ -1,0 +1,106 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>metastore.expression.proxy</name>
+        <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>
+    </property>
+    <property>
+        <name>metastore.task.threads.always</name>
+        <value>org.apache.hadoop.hive.metastore.events.EventCleanerTask</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>s3a://test-bucket/</value>
+    </property>
+
+    <!--Postgres
+    connection properties -->
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://hive-metastore-postgresql/metastore</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>datanucleus.autoCreateSchema</name>
+        <value>true</value>
+    </property>
+
+    <!-- Hive metastore uri assurance -->
+
+    <property>
+        <name>hive.server2.transport.mode</name>
+        <value>http</value>
+    </property>
+
+    <property>
+        <name>hive.server2.thrift.http.port</name>
+        <value>9083</value>
+    </property>
+
+    <property>
+        <name>hive.server2.thrift.http.path</name>
+        <value>cliservice</value>
+    </property>
+
+    <property>
+        <name>hive.server2.authentication</name>
+        <value>NOSASL</value>
+    </property>
+    <property>
+        <name>hive.metastore.sasl.enabled</name>
+        <value>false</value>
+    </property>
+
+    <!-- Storage Connection Info -->
+    <property>
+        <name>fs.s3a.connection.ssl.enabled</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>fs.s3a.endpoint</name>
+        <value>minio:9000</value>
+    </property>
+    <property>
+        <name>fs.s3a.access.key</name>
+        <value>minioadmin</value>
+    </property>
+    <property>
+        <name>fs.s3a.secret.key</name>
+        <value>minioadmin</value>
+    </property>
+    <property>
+        <name>fs.s3a.path.style.access</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>fs.s3a.fast.upload</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>fs.s3a.aws.credentials.provider</name>
+        <value>org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider</value>
+    </property>
+    <property>
+        <name>fs.s3a.impl</name>
+        <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+    </property>
+
+    <!-- Extra Hive config -->
+    <property>
+        <name>hive.metastore.uris</name>
+        <value>thrift://hive-metastore:9083</value>
+    </property>
+</configuration>

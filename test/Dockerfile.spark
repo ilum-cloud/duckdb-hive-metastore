@@ -1,0 +1,20 @@
+FROM ilum/spark:3.5.7-delta
+
+# Add Iceberg and Avro JARs for Spark 3.5
+# Using versions compatible with Spark 3.5.x
+USER root
+
+# Download Iceberg Spark runtime (includes all Iceberg dependencies)
+RUN curl -L https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.7.1/iceberg-spark-runtime-3.5_2.12-1.7.1.jar \
+    -o /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.7.1.jar
+
+# Download Avro for Spark 3.5
+RUN curl -L https://repo1.maven.org/maven2/org/apache/spark/spark-avro_2.12/3.5.3/spark-avro_2.12-3.5.3.jar \
+    -o /opt/spark/jars/spark-avro_2.12-3.5.3.jar
+
+# Ensure proper permissions
+RUN chmod 644 /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.7.1.jar && \
+    chmod 644 /opt/spark/jars/spark-avro_2.12-3.5.3.jar
+
+# Switch back to default user if needed
+USER ${spark_uid}

@@ -1,0 +1,61 @@
+# name: test/sql/csv/describe_csv_table.test
+# description: Test describing a CSV table from HMS
+# group: [csv]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.orders;
+----
+order_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+customer_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+product_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+quantity
+INTEGER
+YES
+NULL
+NULL
+NULL
+total_amount
+DOUBLE
+YES
+NULL
+NULL
+NULL
+order_date
+DATE
+YES
+NULL
+NULL
+NULL
+status
+VARCHAR
+YES
+NULL
+NULL
+NULL

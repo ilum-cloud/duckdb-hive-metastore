@@ -1,0 +1,144 @@
+# name: test/sql/hive/test_type_mapping.test
+# description: Test comprehensive type mapping for Hive tables from HMS
+# group: [hive]
+
+require hive_metastore
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Test type mapping for the type_test table with diverse types
+# This table contains: TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, DOUBLE, DECIMAL(10,2), BOOLEAN, TIMESTAMP, BINARY, VARCHAR
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.type_test;
+----
+test_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+tiny_int_col
+TINYINT
+YES
+NULL
+NULL
+NULL
+small_int_col
+SMALLINT
+YES
+NULL
+NULL
+NULL
+big_int_col
+BIGINT
+YES
+NULL
+NULL
+NULL
+float_col
+FLOAT
+YES
+NULL
+NULL
+NULL
+double_col
+DOUBLE
+YES
+NULL
+NULL
+NULL
+decimal_col
+DECIMAL(10,2)
+YES
+NULL
+NULL
+NULL
+is_active
+BOOLEAN
+YES
+NULL
+NULL
+NULL
+timestamp_col
+TIMESTAMP
+YES
+NULL
+NULL
+NULL
+binary_col
+BLOB
+YES
+NULL
+NULL
+NULL
+category
+VARCHAR
+YES
+NULL
+NULL
+NULL
+
+# Test querying data with all types
+query IIIIIRRTTTT
+SELECT test_id, tiny_int_col, small_int_col, big_int_col, float_col, double_col, decimal_col, is_active, timestamp_col, binary_col, category
+FROM hms.sample_db.type_test
+ORDER BY test_id
+LIMIT 5;
+----
+1	1	1	1000000000	1.5	3.14159	100.00	0	2020-01-01 01:00:00	\x01\x02\x03	A
+2	2	2	2000000000	3	6.28318	100.01	1	2020-01-01 02:00:00	\x02\x03\x04	B
+3	3	3	3000000000	4.5	9.42477	100.02	0	2020-01-01 03:00:00	\x03\x04\x05	C
+4	4	4	4000000000	6	12.56636	100.03	1	2020-01-01 04:00:00	\x04\x05\x06	A
+5	5	5	5000000000	7.5	15.70795	100.04	0	2020-01-01 05:00:00	\x05\x06\x07	B
+
+# Test aggregations on DECIMAL type (precision should be preserved)
+query R
+SELECT SUM(decimal_col) FROM hms.sample_db.type_test;
+----
+10049.50
+
+# Test aggregations on FLOAT type
+query R
+SELECT AVG(float_col) FROM hms.sample_db.type_test;
+----
+75.75
+
+# Test filter on BOOLEAN type
+query I
+SELECT COUNT(*) FROM hms.sample_db.type_test WHERE is_active = true;
+----
+50
+
+# Test filter on TIMESTAMP type
+query I
+SELECT COUNT(*) FROM hms.sample_db.type_test WHERE timestamp_col >= '2020-01-01 00:00:00';
+----
+100
+
+# Test DISTINCT on VARCHAR
+query II
+SELECT category, COUNT(*) as count FROM hms.sample_db.type_test GROUP BY category ORDER BY category;
+----
+A	34
+B	33
+C	33
+
+# Test BIGINT values (large integers)
+query I
+SELECT big_int_col FROM hms.sample_db.type_test WHERE test_id = 50;
+----
+50000000000
+
+# Test TINYINT range
+query I
+SELECT MAX(tiny_int_col) - MIN(tiny_int_col) FROM hms.sample_db.type_test;
+----
+99

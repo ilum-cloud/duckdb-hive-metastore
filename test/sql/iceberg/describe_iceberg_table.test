@@ -1,0 +1,67 @@
+# name: test/sql/iceberg/describe_iceberg_table.test
+# description: Test describing an Iceberg table from HMS
+# group: [iceberg]
+
+require hive_metastore
+
+require parquet
+
+require httpfs
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+INSTALL iceberg; LOAD iceberg;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# Attach HMS catalog
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Enable version guessing for Iceberg tables created by Spark
+# Spark's Iceberg integration with HMS doesn't create version-hint.text files,
+# so DuckDB needs to determine the latest version by examining metadata directory.
+# This is safe for read-only querying of production Iceberg tables.
+# See: https://duckdb.org/docs/extensions/iceberg
+statement ok
+SET unsafe_enable_version_guessing = true;
+
+query TTTTTT
+DESCRIBE TABLE hms.sample_db.inventory;
+----
+inventory_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+product_id
+INTEGER
+YES
+NULL
+NULL
+NULL
+location
+VARCHAR
+YES
+NULL
+NULL
+NULL
+quantity
+INTEGER
+YES
+NULL
+NULL
+NULL
+last_updated
+DATE
+YES
+NULL
+NULL
+NULL
