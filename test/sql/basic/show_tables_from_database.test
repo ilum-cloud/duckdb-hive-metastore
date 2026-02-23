@@ -4,6 +4,8 @@
 
 require hive_metastore
 
+require-env HMS_TEST_AVAILABLE
+
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
