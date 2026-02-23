@@ -31,7 +31,7 @@ test-all: release
 	@echo "✓ Hive Metastore is ready and seeded with data"
 	@echo ""
 	@echo "[4/4] Running tests..."
-	./build/release/test/unittest 'test*'
+	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
 	@echo ""
 	@echo "========================================"
 	@echo "Tests completed. Cleaning up..."
@@ -54,7 +54,7 @@ test-env-stop:
 # Run tests only (assumes env is already started)
 test-run:
 	@echo "Running tests..."
-	./build/release/test/unittest 'test*'
+	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
 
 # Override tidy-check to ensure Thrift files are generated first
 .PHONY: tidy-check

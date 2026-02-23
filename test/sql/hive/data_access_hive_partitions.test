@@ -4,6 +4,8 @@
 
 require hive_metastore
 
+require-env HMS_TEST_AVAILABLE
+
 require httpfs
 
 require parquet
