@@ -240,7 +240,6 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 	// For CSV/Text tables, we must provide the schema to avoid type mismatch crashes
 	// and to ensure correct parsing (Hive tables usually have no header).
 	if (!format_result.IsDelta() && !format_result.IsIceberg() && format_result.IsCSV()) {
-
 		child_list_t<Value> struct_children;
 
 		// Try to parse Spark schema first for CSV tables, as HMS type definitions for CSV
