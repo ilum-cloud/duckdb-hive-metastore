@@ -53,8 +53,8 @@ public:
 
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.storage_extensions["hive_metastore"] = make_uniq<HiveMetastoreStorageExtension>();
-	config.storage_extensions["hms_catalog"] = make_uniq<HiveMetastoreStorageExtension>();
+	StorageExtension::Register(config, "hive_metastore", make_uniq<HiveMetastoreStorageExtension>());
+	StorageExtension::Register(config, "hms_catalog", make_uniq<HiveMetastoreStorageExtension>());
 }
 
 void HiveMetastoreExtension::Load(ExtensionLoader &loader) {
