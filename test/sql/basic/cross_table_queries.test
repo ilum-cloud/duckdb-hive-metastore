@@ -6,15 +6,14 @@ require hive_metastore
 
 require-env HMS_TEST_AVAILABLE
 
+require-env REMOTE_EXTENSIONS
+
 require httpfs
 
 require parquet
 
 # Disable skipping of HTTP errors to see actual failure messages
 set ignore_error_messages
-
-statement ok
-FORCE INSTALL avro; LOAD avro;
 
 statement ok
 INSTALL iceberg; LOAD iceberg;

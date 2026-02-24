@@ -6,6 +6,8 @@ require hive_metastore
 
 require-env HMS_TEST_AVAILABLE
 
+require-env REMOTE_EXTENSIONS
+
 require httpfs
 
 require parquet
