@@ -6,6 +6,17 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 **DuckDB Hive Metastore (HMS) extension** enables DuckDB to connect to Apache Hive Metastore via Thrift protocol and query tables stored in data lakes (S3, MinIO, Azure, GCS, HDFS, etc.). The extension provides seamless integration with the Hive ecosystem while leveraging DuckDB's powerful analytical capabilities.
 
+## Quick Start
+
+To get started, install the extension from the community repository and load it in DuckDB:
+
+```sql
+INSTALL hive_metastore FROM community;
+LOAD hive_metastore;
+```
+
+Now, progress to [usage](#usage) to connect to your Hive Metastore and start querying tables!
+
 ## Features
 
 **Supported Table Formats:**
@@ -83,17 +94,6 @@ INSERT INTO hms.my_db.delta_table VALUES (1, 'value');
 ```
 
 ## Usage
-
-### Quick Start
-
-First, load the extension and any required format extensions:
-
-```sql
--- Load the Hive Metastore extension
--- (not yet available in community repository, install from custom location)
-INSTALL hive_metastore FROM '<your-extension-repository>';
-LOAD hive_metastore;
-```
 
 ### Connecting to Hive Metastore
 
