@@ -60,6 +60,7 @@ test-run:
 .PHONY: tidy-check
 tidy-check:
 	mkdir -p ./build/tidy
+	chmod +x duckdb/scripts/apply_extension_patches.py
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_DEBUG_FLAGS) -DDISABLE_UNITY=1 -DCLANG_TIDY=1 -S $(DUCKDB_SRCDIR) -B build/tidy
 	cmake --build build/tidy --target hms_thrift_lib -j$(shell nproc)
 	cp duckdb/.clang-tidy build/tidy/.clang-tidy
