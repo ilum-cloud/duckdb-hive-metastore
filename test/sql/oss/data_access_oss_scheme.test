@@ -1,10 +1,11 @@
 # name: test/sql/oss/data_access_oss_scheme.test
 # description: Verify Hive tables whose LOCATION uses oss:// resolve correctly via
+# group: [oss]
+
 #              PathUtils::NormalizeScanPath's scheme rewrite (oss:// -> s3://).
 #              Requires test/sql/oss/post_seed_oss_mutation.sh to have flipped
 #              'customers' and 'reviews' table locations to oss:// against the
 #              test HMS (invoked by the test-mutate-oss Makefile target).
-# group: [oss]
 
 require hive_metastore
 
