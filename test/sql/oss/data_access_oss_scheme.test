@@ -1,0 +1,48 @@
+# name: test/sql/oss/data_access_oss_scheme.test
+# description: Verify Hive tables whose LOCATION uses oss:// resolve correctly via
+#              PathUtils::NormalizeScanPath's scheme rewrite (oss:// -> s3://).
+#              Requires test/sql/oss/post_seed_oss_mutation.sh to have flipped
+#              'customers' and 'reviews' table locations to oss:// against the
+#              test HMS (invoked by the test-mutate-oss Makefile target).
+# group: [oss]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+# Scoped secret mirrors the bug report: the user scoped their TYPE S3 secret
+# to s3://<bucket>/ because that is what the rewrite emits. The endpoint here
+# is MinIO instead of an Aliyun endpoint, but the codepath is identical.
+statement ok
+CREATE OR REPLACE SECRET oss (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false, SCOPE 's3://test-bucket/');
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Unpartitioned oss://-located table.
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers;
+----
+100
+
+# Partitioned oss://-located table: full count.
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews;
+----
+150
+
+# Partition pruning still works after the scheme rewrite.
+query I
+SELECT COUNT(*) FROM hms.sample_db.reviews WHERE rating = 5;
+----
+30
+
+# Real rows come back -- proves we are reading bytes, not just resolving metadata.
+query I
+SELECT COUNT(*) FROM (SELECT * FROM hms.sample_db.customers LIMIT 5);
+----
+5
