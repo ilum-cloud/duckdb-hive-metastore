@@ -109,6 +109,9 @@ constexpr const char *READ_CSV = "read_csv";
 namespace url {
 constexpr const char *S3 = "s3://";
 constexpr const char *S3A = "s3a://";
+constexpr const char *OSS = "oss://";
+constexpr const char *COS = "cos://";
+constexpr const char *COSN = "cosn://";
 constexpr const char *HTTP = "http://";
 constexpr const char *HTTPS = "https://";
 constexpr const char *FILE = "file://";
