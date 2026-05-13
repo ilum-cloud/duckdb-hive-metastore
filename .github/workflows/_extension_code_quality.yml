@@ -80,24 +80,35 @@ jobs:
           ref: ${{ inputs.ci_tools_version }}
           repository: ${{ inputs.override_ci_tools_repository }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Cache Python environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-format-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: venv-${{ runner.os }}-format-
+
+      - name: Cache APT Packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.0
+        with:
+          packages: ninja-build clang-format-11
+
       - name: Install
         shell: bash
-        run: |
-            sudo apt-get update -y -qq
-            sudo apt-get install -y -qq ninja-build clang-format-11
-            sudo pip3 install cmake-format 'black==24.*' cxxheaderparser pcpp 'clang_format==11.0.1'
-
-      - name: List Installed Packages
-        shell: bash
-        run: pip3 freeze
+        run: uv sync
 
       - name: Format Check
         shell: bash
         run: |
-          clang-format --version
-          clang-format --dump-config
-          black --version
-          make format-check
+          uv run clang-format --version
+          uv run clang-format --dump-config
+          uv run black --version
+          uv run make format-check
 
   tidy-check:
     name: Tidy Check
