@@ -157,6 +157,32 @@ CREATE SECRET my_s3 (
 SELECT * FROM my_hms.lakehouse.customers;
 ```
 
+### Cloud object stores
+
+Hive table locations can use a variety of cloud URI schemes. The extension
+handles them as follows:
+
+| Scheme(s) | Handling |
+| --- | --- |
+| `s3://`, `s3a://` | Work out of the box with a `TYPE S3` secret. `s3a://` is rewritten to `s3://`. |
+| `oss://` (Alibaba OSS), `cos://` / `cosn://` (Tencent COS) | Automatically rewritten to `s3://`. Create a `TYPE S3` secret with the appropriate `ENDPOINT` and a scope on the rewritten URL. |
+| `gs://` (Google Cloud Storage) | Pass-through. Use DuckDB's `httpfs` + a `TYPE GCS` secret. |
+| `abfs://`, `abfss://`, `wasb://`, `wasbs://`, `azure://`, `az://` (Azure Blob / ADLS) | Pass-through. Requires `INSTALL azure; LOAD azure;` and a `TYPE AZURE` secret. |
+
+Example for an Alibaba OSS-backed table — note that the secret's `SCOPE`
+uses the rewritten `s3://` form because that's the scheme DuckDB sees after
+normalization:
+
+```sql
+CREATE PERSISTENT SECRET oss (
+    TYPE S3,
+    KEY_ID 'your-access-key',
+    SECRET 'your-secret-key',
+    ENDPOINT 'oss-us-east-1.aliyuncs.com',
+    SCOPE 's3://my-bucket/'
+);
+```
+
 ### Working with Iceberg Tables
 
 Apache Iceberg tables require the `iceberg` extension and special configuration:

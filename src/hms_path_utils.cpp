@@ -1,8 +1,31 @@
 #include "hms_path_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 namespace hms {
+
+namespace {
+struct SchemeRewrite {
+	const char *from;
+	const char *to;
+};
+
+// S3-API-compatible cloud schemes that DuckDB's httpfs does not recognize
+// natively. Rewriting to s3:// lets users reach these stores with a standard
+// TYPE S3 secret pointed at the appropriate endpoint.
+//
+// Azure (abfs/abfss/wasb/wasbs/azure/az) and GCS (gs) are deliberately omitted:
+// DuckDB has dedicated handling for them via the azure extension and the
+// TYPE GCS secret in httpfs. Rewriting those would break credential routing.
+constexpr SchemeRewrite S3_COMPATIBLE_SCHEMES[] = {
+    {url::S3A, url::S3},
+    {url::OSS, url::S3},
+    {url::COSN, url::S3},
+    {url::COS, url::S3},
+};
+} // namespace
 
 string PathUtils::StripPlaceholder(const string &path) {
 	// Check for "-__PLACEHOLDER__" suffix
@@ -15,9 +38,11 @@ string PathUtils::StripPlaceholder(const string &path) {
 	return path;
 }
 
-string PathUtils::ConvertS3AToS3(const string &path) {
-	if (StringUtil::StartsWith(path, url::S3A)) {
-		return string(url::S3) + path.substr(6);
+string PathUtils::RewriteS3CompatibleScheme(const string &path) {
+	for (const auto &rule : S3_COMPATIBLE_SCHEMES) {
+		if (StringUtil::StartsWith(path, rule.from)) {
+			return string(rule.to) + path.substr(std::strlen(rule.from));
+		}
 	}
 	return path;
 }
@@ -92,9 +117,11 @@ NormalizedPathResult PathUtils::NormalizeScanPath(const string &storage_path, co
 			}
 		}
 	}
-	// Convert s3a:// to s3://
-	else if (StringUtil::StartsWith(scan_path, url::S3A)) {
-		scan_path = ConvertS3AToS3(scan_path);
+	// Rewrite S3-API-compatible schemes (s3a, oss, cos, cosn) to s3://
+	// so existing TYPE S3 secrets apply. Azure/GCS schemes pass through
+	// unchanged and rely on their dedicated DuckDB extensions.
+	else {
+		scan_path = RewriteS3CompatibleScheme(scan_path);
 	}
 
 	// Format-specific path adjustments

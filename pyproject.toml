@@ -1,0 +1,21 @@
+[project]
+name = "duckdb-hive-metastore-tooling"
+version = "0.1.0"
+description = "Build/format tooling for the duckdb-hive-metastore extension. Not the extension itself."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned to keep CI and local agree on Python formatting. Bumping requires
+    # re-running `uv run make format-fix` and committing the diff.
+    "black>=26.3.1",
+    "clang-format==11.0.1",
+    "cmake-format>=0.6.13",
+    "cxxheaderparser>=1.7.0",
+    "pcpp>=1.30",
+]
+
+[tool.black]
+# Black 26 defaults --target-version to py314 and emits an AST safety-check
+# warning when invoked from older Python venvs. Pinning the target silences
+# the warning without changing how files are formatted.
+target-version = ["py311", "py312", "py313"]
