@@ -12,7 +12,7 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Hive Metastore integration test targets
-.PHONY: test-all test-env-start test-env-stop test-run
+.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss
 
 # Main target: build, start env, run tests, stop env
 test-all: release
@@ -20,17 +20,20 @@ test-all: release
 	@echo "Running Hive Metastore Integration Tests"
 	@echo "========================================"
 	@echo ""
-	@echo "[1/4] Cleaning up any old containers..."
+	@echo "[1/5] Cleaning up any old containers..."
 	cd test && docker compose down -v --remove-orphans 2>/dev/null || true
 	@echo ""
-	@echo "[2/4] Starting Hive Metastore test environment..."
+	@echo "[2/5] Starting Hive Metastore test environment..."
 	cd test && docker compose up -d
 	@echo ""
-	@echo "[3/4] Waiting for Hive Metastore to be ready and seeded..."
+	@echo "[3/5] Waiting for Hive Metastore to be ready and seeded..."
 	cd test && docker compose wait spark-seeder
 	@echo "✓ Hive Metastore is ready and seeded with data"
 	@echo ""
-	@echo "[4/4] Running tests..."
+	@echo "[4/5] Applying oss:// metastore mutation for scheme-rewrite test..."
+	bash test/sql/oss/post_seed_oss_mutation.sh
+	@echo ""
+	@echo "[5/5] Running tests..."
 	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
 	@echo ""
 	@echo "========================================"
@@ -55,6 +58,11 @@ test-env-stop:
 test-run:
 	@echo "Running tests..."
 	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
+
+# Flip selected HMS table locations to oss:// (idempotent). Must be run after
+# the test env is up; required for test/sql/oss/data_access_oss_scheme.test.
+test-mutate-oss:
+	bash test/sql/oss/post_seed_oss_mutation.sh
 
 # Override tidy-check to ensure Thrift files are generated first
 .PHONY: tidy-check
