@@ -33,7 +33,7 @@ public:
 	// Normalize a storage path for scanning
 	// Handles:
 	// - Stripping __PLACEHOLDER__ suffix
-	// - Converting s3a:// to s3://
+	// - Rewriting S3-API-compatible schemes (s3a, oss, cos, cosn) to s3://
 	// - Converting http:// to s3:// with endpoint config
 	// - Adding trailing slashes for Delta tables
 	// - Removing trailing slashes for Iceberg tables
@@ -50,8 +50,9 @@ public:
 	// Strip the __PLACEHOLDER__ suffix from a path
 	static string StripPlaceholder(const string &path);
 
-	// Convert s3a:// to s3://
-	static string ConvertS3AToS3(const string &path);
+	// Rewrite S3-API-compatible scheme prefixes (s3a, oss, cos, cosn) to s3://.
+	// Returns the path unchanged when no rule matches.
+	static string RewriteS3CompatibleScheme(const string &path);
 
 	// Ensure proper trailing slash for Delta tables
 	static string EnsureTrailingSlash(const string &path);
