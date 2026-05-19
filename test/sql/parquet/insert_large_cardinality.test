@@ -1,0 +1,88 @@
+# name: test/sql/parquet/insert_large_cardinality.test
+# description: Test HMS-Parquet INSERT at large row count (50k rows) to surface rowgroup/parallelism/file-rotation issues hidden by tiny inputs
+# group: [parquet]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+statement ok
+CREATE TABLE hms.sample_db.duck_large_basic (
+    id BIGINT,
+    payload VARCHAR
+) WITH (format='parquet', location='s3a://test-bucket/duck_large_basic/');
+
+# INSERT 50,000 rows via range() — large enough to span multiple Parquet row groups
+# and exercise any parallelism or file-rotation logic in the write path.
+statement ok
+INSERT INTO hms.sample_db.duck_large_basic
+SELECT i, 'row_' || i::VARCHAR FROM range(50000) t(i);
+
+# Aggregate-only assertions: querying individual rows for 50k results would overflow
+# the sqllogictest output buffer.
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_large_basic;
+----
+50000
+
+# SUM(id) = 0+1+...+49999 = 50000*49999/2 = 1249975000
+query III
+SELECT SUM(id), MIN(id), MAX(id) FROM hms.sample_db.duck_large_basic;
+----
+1249975000	0	49999
+
+# COUNT(DISTINCT payload) = 50000 proves no payload was duplicated or dropped.
+query I
+SELECT COUNT(DISTINCT payload) FROM hms.sample_db.duck_large_basic;
+----
+50000
+
+# PhysicalCopyToFile runs with parallel=false, so a single INSERT must produce exactly
+# one file. Counting distinct filenames via read_parquet proves no file rotation occurred.
+query I
+SELECT COUNT(DISTINCT filename) FROM read_parquet('s3://test-bucket/duck_large_basic/*.parquet', filename=true);
+----
+1
+
+# A second INSERT adds 10,000 more rows (i+50000 to avoid id collisions).
+statement ok
+INSERT INTO hms.sample_db.duck_large_basic
+SELECT i + 50000, 'row_' || (i + 50000)::VARCHAR FROM range(10000) t(i);
+
+# Cumulative row count must reflect both INSERTs.
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_large_basic;
+----
+60000
+
+# Each INSERT must produce its own file — so two INSERTs means two distinct files.
+query I
+SELECT COUNT(DISTINCT filename) FROM read_parquet('s3://test-bucket/duck_large_basic/*.parquet', filename=true);
+----
+2
+
+# Re-attach round-trip: rebuild the catalog entry from the cold path (LoadEntries) to
+# catch any schema/metadata divergence between CREATE TABLE and the stored HMS entry.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_large_basic;
+----
+60000

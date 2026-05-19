@@ -1,0 +1,149 @@
+# name: test/sql/parquet/insert_implicit_cast.test
+# description: Pin DuckDB's implicit-cast contract on the HMS write path. The HMS
+# group: [parquet]
+
+#              extension adds no cast logic of its own — INSERT goes through DuckDB's
+#              standard binder, which applies implicit casts. These tests verify that
+#              the casts compose correctly with the HMS write path (no surprises from
+#              extension-specific code).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# INT → BIGINT widening: the binder promotes the INTEGER literal before the writer
+# sees it; BIGINT storage must round-trip the exact value.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_int_bigint (
+    v BIGINT
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_int_bigint');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_int_bigint VALUES (2147483647);
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_int_bigint;
+----
+2147483647
+
+# Small integer literal → INTEGER widening: DuckDB infers bare 127 as INTEGER,
+# so this tests that inserting a small integer literal into an INTEGER column works
+# without surprises. The column type drives binding; no explicit cast needed.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_tinyint_int (
+    v INTEGER
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_tinyint_int');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_tinyint_int VALUES (127);
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_tinyint_int;
+----
+127
+
+# FLOAT → DOUBLE widening: precision is retained on the upcast.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_float_double (
+    v DOUBLE
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_float_double');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_float_double VALUES (1.5::REAL);
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_float_double;
+----
+1.5
+
+# DOUBLE → REAL narrowing: the column is REAL so the double-precision literal is
+# narrowed to float32 by the binder. The returned value is the float32 approximation,
+# not the input literal.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_double_real (
+    v REAL
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_double_real');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_double_real VALUES (3.14159265358979);
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_double_real;
+----
+3.1415927
+
+# VARCHAR → DATE coercion: DuckDB's binder accepts a string literal where a DATE
+# is expected and casts implicitly.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_varchar_date (
+    v DATE
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_varchar_date');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_varchar_date VALUES ('2025-01-15');
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_varchar_date;
+----
+2025-01-15
+
+# VARCHAR → INTEGER coercion.
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_varchar_int (
+    v INTEGER
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_varchar_int');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cast_varchar_int VALUES ('42');
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_varchar_int;
+----
+42
+
+# Re-attach round-trip: cold-load all six tables and spot-check two of them to
+# confirm the schema/data survives a detach → attach cycle.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_int_bigint;
+----
+2147483647
+
+query I
+SELECT v FROM hms.sample_db.duck_cast_varchar_date;
+----
+2025-01-15
+
+# Out-of-range failure: the column is TINYINT so DuckDB attempts an implicit cast
+# from the integer literal 1000 to TINYINT, which overflows (-128..127).
+statement ok
+CREATE TABLE hms.sample_db.duck_cast_overflow_tinyint (
+    v TINYINT
+) WITH (format='parquet', location='s3a://test-bucket/duck_cast_overflow_tinyint');
+
+statement error
+INSERT INTO hms.sample_db.duck_cast_overflow_tinyint VALUES (1000);
+----
+
+# Bad VARCHAR → DATE failure: the string is not a valid date.
+statement error
+INSERT INTO hms.sample_db.duck_cast_varchar_date VALUES ('not-a-date');
+----
+

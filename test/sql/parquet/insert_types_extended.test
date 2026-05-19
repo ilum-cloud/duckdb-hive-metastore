@@ -1,0 +1,154 @@
+# name: test/sql/parquet/insert_types_extended.test
+# description: Extended type round-trips for HMS Parquet — MAP, nested STRUCT,
+# group: [parquet]
+
+#              LIST-of-STRUCT. Also pins the silent-downcast behavior for
+#              INTERVAL, UUID, and ENUM (no explicit branch in
+#              LogicalTypeToHiveType → default: return STRING).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# --- MAP(VARCHAR, INTEGER) ---
+# LogicalTypeToHiveType has an explicit MAP branch → produces map<string,int>.
+statement ok
+CREATE TABLE hms.sample_db.duck_xtypes_map (
+    id INTEGER,
+    attrs MAP(VARCHAR, INTEGER)
+) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_map');
+
+statement ok
+INSERT INTO hms.sample_db.duck_xtypes_map VALUES
+    (1, MAP {'a': 1, 'b': 2}),
+    (2, MAP {'x': 100}),
+    (3, NULL);
+
+query IT
+SELECT id, attrs FROM hms.sample_db.duck_xtypes_map ORDER BY id;
+----
+1	{a=1, b=2}
+2	{x=100}
+3	NULL
+
+# --- Nested STRUCT (STRUCT containing STRUCT) ---
+# Both the outer and inner STRUCT hit the same LogicalTypeToHiveType branch
+# recursively → wrapper column gets Hive type struct<inner:struct<a:int,b:varchar>,tag:string>.
+statement ok
+CREATE TABLE hms.sample_db.duck_xtypes_nested_struct (
+    id INTEGER,
+    wrapper STRUCT(inner STRUCT(a INTEGER, b VARCHAR), tag VARCHAR)
+) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_nested_struct');
+
+statement ok
+INSERT INTO hms.sample_db.duck_xtypes_nested_struct VALUES
+    (1, {'inner': {'a': 10, 'b': 'hello'}, 'tag': 'first'}),
+    (2, {'inner': {'a': 20, 'b': NULL}, 'tag': NULL}),
+    (3, NULL);
+
+query IT
+SELECT id, wrapper FROM hms.sample_db.duck_xtypes_nested_struct ORDER BY id;
+----
+1	{'inner': {'a': 10, 'b': hello}, 'tag': first}
+2	{'inner': {'a': 20, 'b': NULL}, 'tag': NULL}
+3	NULL
+
+# --- LIST of STRUCT ---
+# LIST branch wraps its child type via LogicalTypeToHiveType recursively, and
+# the child is a STRUCT → array<struct<a:int,b:varchar>>.
+statement ok
+CREATE TABLE hms.sample_db.duck_xtypes_list_struct (
+    id INTEGER,
+    items STRUCT(a INTEGER, b VARCHAR)[]
+) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_list_struct');
+
+statement ok
+INSERT INTO hms.sample_db.duck_xtypes_list_struct VALUES
+    (1, [{'a': 1, 'b': 'x'}, {'a': 2, 'b': 'y'}]),
+    (2, [{'a': 3, 'b': NULL}]),
+    (3, NULL);
+
+query IT
+SELECT id, items FROM hms.sample_db.duck_xtypes_list_struct ORDER BY id;
+----
+1	[{'a': 1, 'b': x}, {'a': 2, 'b': y}]
+2	[{'a': 3, 'b': NULL}]
+3	NULL
+
+# --- INTERVAL, UUID, ENUM: no explicit branch in LogicalTypeToHiveType ---
+# These fall through to the default case which returns STRING (hive_type::STRING).
+# CREATE TABLE succeeds but the column is stored as Hive type "string", so the
+# DuckDB type recovered on re-attach is VARCHAR, not the original type.
+# ENUM is also out of scope — no mapping exists in this contract.
+
+# INTERVAL silently becomes string in Hive metadata.
+statement ok
+CREATE TABLE hms.sample_db.duck_xtypes_interval (
+    id INTEGER,
+    dur INTERVAL
+) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_interval');
+
+statement ok
+INSERT INTO hms.sample_db.duck_xtypes_interval VALUES (1, INTERVAL '1' DAY), (2, NULL);
+
+# The column type stored in HMS is "string", so typeof() returns VARCHAR.
+query T
+SELECT typeof(dur) FROM hms.sample_db.duck_xtypes_interval WHERE id = 1;
+----
+VARCHAR
+
+# UUID silently becomes string in Hive metadata.
+statement ok
+CREATE TABLE hms.sample_db.duck_xtypes_uuid (
+    id INTEGER,
+    uid UUID
+) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_uuid');
+
+statement ok
+INSERT INTO hms.sample_db.duck_xtypes_uuid VALUES (1, '550e8400-e29b-41d4-a716-446655440000'::UUID), (2, NULL);
+
+# The column type stored in HMS is "string", so typeof() returns VARCHAR.
+query T
+SELECT typeof(uid) FROM hms.sample_db.duck_xtypes_uuid WHERE id = 1;
+----
+VARCHAR
+
+# --- DETACH / ATTACH round-trip for all supported types ---
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query IT
+SELECT id, attrs FROM hms.sample_db.duck_xtypes_map ORDER BY id;
+----
+1	{a=1, b=2}
+2	{x=100}
+3	NULL
+
+query IT
+SELECT id, wrapper FROM hms.sample_db.duck_xtypes_nested_struct ORDER BY id;
+----
+1	{'inner': {'a': 10, 'b': hello}, 'tag': first}
+2	{'inner': {'a': 20, 'b': NULL}, 'tag': NULL}
+3	NULL
+
+query IT
+SELECT id, items FROM hms.sample_db.duck_xtypes_list_struct ORDER BY id;
+----
+1	[{'a': 1, 'b': x}, {'a': 2, 'b': y}]
+2	[{'a': 3, 'b': NULL}]
+3	NULL

@@ -1,0 +1,104 @@
+# name: test/sql/basic/case_sensitivity.test
+# description: Pins HMS column-name case behavior:
+# group: [basic]
+
+#   DuckDB sends column names as written to HMS via Thrift. HMS lowercases them
+#   server-side before storing. After DETACH/re-ATTACH the lowercased names come
+#   back through LoadEntries. This file pins that contract.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# --- Scenario 1: mixed-case column names ---
+# DuckDB parses unquoted identifiers case-insensitively, so MyCol/MYCOL/mycol all
+# resolve to the same column at query time regardless of what HMS stores.
+statement ok
+CREATE TABLE hms.sample_db.duck_case_mixed (MyCol INTEGER, FOO VARCHAR, lower_already INTEGER)
+WITH (location='s3a://test-bucket/duck_case_mixed/', format='parquet');
+
+statement ok
+INSERT INTO hms.sample_db.duck_case_mixed VALUES (1, 'hello', 42);
+
+# Exact-case reference — works because DuckDB's resolver is case-insensitive.
+query I
+SELECT MyCol FROM hms.sample_db.duck_case_mixed;
+----
+1
+
+# Lowercase reference — same result; DuckDB folds unquoted identifiers.
+query I
+SELECT mycol FROM hms.sample_db.duck_case_mixed;
+----
+1
+
+# Uppercase reference.
+query I
+SELECT MYCOL FROM hms.sample_db.duck_case_mixed;
+----
+1
+
+# --- Scenario 2: re-attach round-trip; pin the actual stored column names ---
+# HMS lowercases column names on the server side, so after a fresh attach
+# information_schema.columns shows the lowercased form ("mycol", "foo", "lower_already").
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Pin the column names exactly as HMS stores them — lowercase.
+query I
+SELECT column_name FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_case_mixed'
+ORDER BY ordinal_position;
+----
+mycol
+foo
+lower_already
+
+# Verify the column count is preserved (3 columns, no merging or loss).
+query I
+SELECT COUNT(*) FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_case_mixed';
+----
+3
+
+# Data is still accessible after re-attach under any case form.
+query I
+SELECT mycol FROM hms.sample_db.duck_case_mixed;
+----
+1
+
+# --- Scenario 3a: duplicate column names caught by DuckDB's parser (regression guard) ---
+# DuckDB's ColumnList uses a case-insensitive name map, so "Foo" and "foo" are
+# considered the same column at parse/bind time. The error fires in DuckDB's
+# catalog layer BEFORE the Thrift call is ever made.
+statement error
+CREATE TABLE hms.sample_db.duck_case_conflict (Foo INTEGER, foo INTEGER)
+WITH (location='s3a://test-bucket/duck_case_conflict/', format='parquet');
+----
+already exists
+
+# --- Scenario 3b: HMS-side post-lowercase collision via quoted identifiers ---
+# Double-quoted identifiers are case-sensitive in DuckDB, so "Foo" and "foo" are
+# treated as distinct columns and both forwarded to HMS via Thrift. HMS lowercases
+# column names server-side, producing two columns named "foo", and should reject
+# the collision. Unlike 3a, the Thrift call IS made here — this tests HMS behavior,
+# not DuckDB's parser.
+statement error
+CREATE TABLE hms.sample_db.duck_case_hms_collision ("Foo" INTEGER, "foo" INTEGER)
+WITH (location='s3a://test-bucket/duck_case_hms_collision/', format='parquet');
+----
