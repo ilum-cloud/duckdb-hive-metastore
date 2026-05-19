@@ -54,6 +54,53 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           NINJA_STATUS: '[%f/%t %es] '
 
+  # Independent Spark cross-engine verification job. Runs in parallel with `test`
+  # and is NOT in any `needs:` chain — a Spark-side regression fails its own job
+  # without blocking the main `test` job or binary shipping.
+  # This duplicates the build + env-up sequence with the `test` job (~2x CI minutes),
+  # but the tradeoff is intentional: independent failure surfaces and parallel
+  # execution (faster wall-clock) outweigh the duplicated work.
+  spark-verify:
+    name: Spark Cross-Engine Verify
+    runs-on: ubuntu-latest
+    env:
+      GEN: ninja
+      TIDY_THREADS: 4
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build ccache git linux-libc-dev flex bison libcurl4-openssl-dev libssl-dev libthrift-dev thrift-compiler
+
+      - name: Cache ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Spark seeder image with cache
+        uses: docker/build-push-action@v6
+        with:
+          context: ./test
+          file: ./test/Dockerfile.spark
+          tags: hive-metastore-test-spark-seeder:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Spark cross-engine verification
+        run: |
+          make -j$(nproc) test-spark-verify
+        env:
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          NINJA_STATUS: '[%f/%t %es] '
+
   duckdb-stable-build:
     name: Build extension binaries
     needs: test
