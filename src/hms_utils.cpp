@@ -456,68 +456,6 @@ LogicalType HMSUtils::TypeToLogicalType(ClientContext &context, const string &ty
 	throw NotImplementedException("Unsupported or unrecognized Hive type: '%s'", type_text.c_str());
 }
 
-//! Map Avro-incompatible types to Avro-compatible equivalents
-//!
-//! The Avro format has limited type support compared to Hive/Parquet:
-//! - DATE is stored as INT32 (days since Unix epoch 1970-01-01)
-//! - TIMESTAMP is stored as INT64 (microseconds since Unix epoch)
-//! - DECIMAL may have precision/scale limitations
-//!
-//! This function converts HMS schema types to match what the DuckDB Avro extension
-//! actually returns when reading Avro files, preventing type mismatch errors.
-//!
-//! References:
-//! - Avro spec: https://avro.apache.org/docs/++version++/specification/
-//! - DuckDB Avro extension issue: https://github.com/duckdb/duckdb-avro/issues/6
-LogicalType HMSUtils::MapTypeForAvro(const LogicalType &hms_type) {
-	switch (hms_type.id()) {
-	case LogicalTypeId::DATE:
-		// Avro stores dates as INT32 (days since epoch)
-		// The Avro extension currently returns INTEGER instead of DATE
-		return LogicalType::INTEGER;
-
-	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIMESTAMP_TZ:
-	case LogicalTypeId::TIMESTAMP_MS:
-	case LogicalTypeId::TIMESTAMP_NS:
-	case LogicalTypeId::TIMESTAMP_SEC:
-		// Avro stores timestamps as INT64 (microseconds since epoch)
-		// The Avro extension may return BIGINT instead of TIMESTAMP
-		return LogicalType::BIGINT;
-
-	case LogicalTypeId::LIST: {
-		// Recursively map element types
-		auto &child_type = ListType::GetChildType(hms_type);
-		auto mapped_child = MapTypeForAvro(child_type);
-		return LogicalType::LIST(mapped_child);
-	}
-
-	case LogicalTypeId::STRUCT: {
-		// Recursively map struct field types
-		auto &child_types = StructType::GetChildTypes(hms_type);
-		child_list_t<LogicalType> mapped_children;
-		for (const auto &child : child_types) {
-			auto mapped_child_type = MapTypeForAvro(child.second);
-			mapped_children.push_back(make_pair(child.first, mapped_child_type));
-		}
-		return LogicalType::STRUCT(mapped_children);
-	}
-
-	case LogicalTypeId::MAP: {
-		// Recursively map key and value types
-		auto &key_type = MapType::KeyType(hms_type);
-		auto &value_type = MapType::ValueType(hms_type);
-		auto mapped_key = MapTypeForAvro(key_type);
-		auto mapped_value = MapTypeForAvro(value_type);
-		return LogicalType::MAP(mapped_key, mapped_value);
-	}
-
-	default:
-		// Other types (INTEGER, BIGINT, FLOAT, DOUBLE, VARCHAR, etc.) are compatible
-		return hms_type;
-	}
-}
-
 string HMSUtils::LogicalTypeToHiveType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::TINYINT:
@@ -590,23 +528,21 @@ Apache::Hadoop::Hive::Table HMSUtils::BuildThriftTable(ClientContext &context, H
 	// Storage descriptor
 	Apache::Hadoop::Hive::StorageDescriptor sd;
 
+	string fmt = StringUtil::Lower(format);
+	StringUtil::Trim(fmt);
+	if (fmt.empty()) {
+		fmt = hms::format::PARQUET;
+	}
+
 	// Columns
 	sd.cols.clear();
 	for (auto it = base.columns.Logical().begin(); it != base.columns.Logical().end(); ++it) {
 		auto &col = *it;
 		Apache::Hadoop::Hive::FieldSchema fs;
 		fs.name = col.GetName();
-		// Map DuckDB LogicalType to Hive type string
 		fs.type = HMSUtils::LogicalTypeToHiveType(col.GetType());
 		fs.comment = col.Comment().ToString();
 		sd.cols.push_back(fs);
-	}
-
-	// Default to Parquet if unspecified
-	string fmt = StringUtil::Lower(format);
-	StringUtil::Trim(fmt);
-	if (fmt.empty()) {
-		fmt = hms::format::PARQUET;
 	}
 
 	if (fmt == hms::format::PARQUET) {
@@ -621,6 +557,15 @@ Apache::Hadoop::Hive::Table HMSUtils::BuildThriftTable(ClientContext &context, H
 		sd.outputFormat = hms::storage_format::TEXT_OUTPUT_FORMAT;
 		Apache::Hadoop::Hive::SerDeInfo serde;
 		serde.serializationLib = hms::storage_format::TEXT_SERDE_LIB;
+		// DuckDB's CSV writer emits comma-separated output by default; record that in the SerDe
+		// so the read path (which honors field.delim from HMS) decodes the file correctly.
+		serde.parameters[hms::serde_param::FIELD_DELIM] = ",";
+		sd.serdeInfo = serde;
+	} else if (fmt == hms::format::AVRO) {
+		sd.inputFormat = hms::storage_format::AVRO_INPUT_FORMAT;
+		sd.outputFormat = hms::storage_format::AVRO_OUTPUT_FORMAT;
+		Apache::Hadoop::Hive::SerDeInfo serde;
+		serde.serializationLib = hms::storage_format::AVRO_SERDE_LIB;
 		sd.serdeInfo = serde;
 	} else if (fmt == hms::format::DELTA) {
 		// Delta is not supported to be managed by Hive metastore directly here
