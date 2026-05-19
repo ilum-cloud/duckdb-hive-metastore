@@ -1,0 +1,94 @@
+# name: test/sql/s3/insert_s3a_rewrite.test
+# description: Test that DuckDB INSERT into a Spark-created s3a:// Parquet table rewrites the
+#              path to s3:// at write time (via PathUtils) and that both the direct s3:// read
+#              and the HMS scan path agree on the written data.
+# group: [s3]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Verify the Spark-created table exists and is empty.
+# The table was seeded by test/seed_hive_data_spark.py with LOCATION s3a://test-bucket/spark_writable_parquet/.
+# No data was seeded — DuckDB must write the first file.
+# The seed script deletes the S3 directory before recreating the table, so prior run data is gone.
+query I
+SELECT COUNT(*) FROM hms.sample_db.spark_writable_parquet;
+----
+0
+
+# INSERT 5 rows. PathUtils rewrites the HMS-stored s3a:// location to s3:// before passing
+# it to the S3 FileSystem, so this write must succeed even though HMS stores an s3a:// URI.
+statement ok
+INSERT INTO hms.sample_db.spark_writable_parquet VALUES
+    (1, 'alice', 1.1),
+    (2, 'bob',   2.2),
+    (3, 'carol', 3.3),
+    (4, 'dave',  4.4),
+    (5, 'eve',   5.5);
+
+# Verify row count via HMS scan path (proves the extension reads the file it just wrote).
+query I
+SELECT COUNT(*) FROM hms.sample_db.spark_writable_parquet;
+----
+5
+
+# Read back content via HMS scan to confirm values are intact.
+query ITR
+SELECT id, name, score FROM hms.sample_db.spark_writable_parquet ORDER BY id;
+----
+1	alice	1.1
+2	bob	2.2
+3	carol	3.3
+4	dave	4.4
+5	eve	5.5
+
+# Direct s3:// read — proves the s3a→s3 rewrite happened on WRITE (the file lives at s3://).
+# Using a glob here is acceptable: there is exactly one file in this freshly-written location.
+query I
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/spark_writable_parquet/*.parquet');
+----
+5
+
+query ITR
+SELECT id, name, score FROM read_parquet('s3://test-bucket/spark_writable_parquet/*.parquet') ORDER BY id;
+----
+1	alice	1.1
+2	bob	2.2
+3	carol	3.3
+4	dave	4.4
+5	eve	5.5
+
+# DETACH/ATTACH round-trip: rebuilds the catalog from HMS (cold LoadEntries path) rather than
+# relying on the warm in-process entry. Confirms the written file is visible after a fresh attach.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.spark_writable_parquet;
+----
+5
+
+query ITR
+SELECT id, name, score FROM hms.sample_db.spark_writable_parquet ORDER BY id;
+----
+1	alice	1.1
+2	bob	2.2
+3	carol	3.3
+4	dave	4.4
+5	eve	5.5

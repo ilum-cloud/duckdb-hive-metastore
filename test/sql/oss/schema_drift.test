@@ -1,0 +1,67 @@
+# name: test/sql/oss/schema_drift.test
+# description: Verify that a column added directly to HMS metadata after initial
+# group: [oss]
+
+#              catalog seeding is visible to DuckDB without restarting. Exercises
+#              the "schema drift" path: HMS evolves independently of the Parquet
+#              files, so existing rows return NULL for the new column.
+#              Requires test/sql/oss/post_seed_schema_drift.sh to have inserted
+#              'drift_note' into COLUMNS_V2 for sample_db.customers
+#              (invoked by the test-schema-drift Makefile target).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3_local (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false, SCOPE 's3://test-bucket/');
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# The drifted column must appear in information_schema.
+query I
+SELECT COUNT(*) FROM information_schema.columns
+ WHERE table_catalog = 'hms'
+   AND table_schema   = 'sample_db'
+   AND table_name     = 'customers'
+   AND column_name    = 'drift_note';
+----
+1
+
+# Existing rows return NULL for the retroactively added column.
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers WHERE drift_note IS NULL;
+----
+100
+
+# Total row count is unaffected.
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers;
+----
+100
+
+# DETACH and re-ATTACH forces a cold catalog reload -- drift_note must still be visible.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM information_schema.columns
+ WHERE table_catalog = 'hms'
+   AND table_schema   = 'sample_db'
+   AND table_name     = 'customers'
+   AND column_name    = 'drift_note';
+----
+1
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.customers WHERE drift_note IS NULL;
+----
+100

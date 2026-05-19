@@ -1,0 +1,92 @@
+# name: test/sql/parquet/reverse_cross_engine.test
+# description: DuckDB INSERT into a Spark-seeded Parquet table (cross-engine append path)
+# group: [parquet]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Baseline: seed script wrote exactly 10 Spark rows.
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet;
+----
+10
+
+# DuckDB appends 5 more rows. Ids 11-15 use a different name prefix so
+# row origin (Spark vs. DuckDB) can be verified independently via LIKE.
+statement ok
+INSERT INTO hms.sample_db.cross_engine_parquet VALUES
+    (11, 'duck_row_11', 16.5),
+    (12, 'duck_row_12', 18.0),
+    (13, 'duck_row_13', 19.5),
+    (14, 'duck_row_14', 21.0),
+    (15, 'duck_row_15', 22.5);
+
+# Total must be 15 after the append.
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet;
+----
+15
+
+# Verify Spark-written rows are still intact.
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet WHERE name LIKE 'spark_row_%';
+----
+10
+
+# Verify DuckDB-written rows are visible.
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet WHERE name LIKE 'duck_row_%';
+----
+5
+
+# Spot-check a known DuckDB row to confirm values survive the round-trip.
+query ITD
+SELECT id, name, score FROM hms.sample_db.cross_engine_parquet WHERE id = 11;
+----
+11	duck_row_11	16.5
+
+# Spark wrote at least one file; DuckDB INSERT adds one more. The combined
+# directory must therefore contain more than one distinct Parquet file.
+# (Exact Spark file count depends on its default parallelism, but >1 total is guaranteed.)
+query I
+SELECT COUNT(DISTINCT filename) > 1
+FROM read_parquet('s3://test-bucket/cross_engine_parquet/*.parquet', filename=true);
+----
+true
+
+# DETACH / ATTACH round-trip exercises the cold LoadEntries path so we confirm
+# that the schema-plus-files state persisted in HMS, not just in the warm catalog.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet;
+----
+15
+
+# Verify both origin prefixes still readable after cold attach.
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet WHERE name LIKE 'spark_row_%';
+----
+10
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet WHERE name LIKE 'duck_row_%';
+----
+5
