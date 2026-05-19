@@ -183,9 +183,9 @@ static PhysicalOperator &PlanHMSWrite(ClientContext &context, PhysicalPlanGenera
 	// extension isn't loaded, which is the right user signal.
 	CatalogEntryRetriever entry_retriever {context};
 	auto &system_catalog = Catalog::GetSystemCatalog(context);
-	auto entry = system_catalog.GetEntry(entry_retriever, DEFAULT_SCHEMA,
-	                                     {CatalogType::COPY_FUNCTION_ENTRY, format_name},
-	                                     OnEntryNotFound::THROW_EXCEPTION);
+	auto entry =
+	    system_catalog.GetEntry(entry_retriever, DEFAULT_SCHEMA, {CatalogType::COPY_FUNCTION_ENTRY, format_name},
+	                            OnEntryNotFound::THROW_EXCEPTION);
 	auto &copy_function_entry = entry->Cast<CopyFunctionCatalogEntry>();
 	CopyFunction function = copy_function_entry.function;
 	if (!function.copy_to_bind) {
