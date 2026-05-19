@@ -27,13 +27,13 @@ SELECT COUNT(*) FROM hms.sample_db.shipments;
 ----
 80
 
-# Test schema of shipments table - ship_date is now INTEGER (days since epoch) due to Avro storage
-query IIITTI
+# Schema of shipments: ship_date is DATE (duckdb-avro resolves Avro's date logical type).
+query IIITTT
 SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
 FROM hms.sample_db.shipments
 WHERE shipment_id = 1;
 ----
-1	1	FedEx	TRK00000001	in_transit	19723
+1	1	FedEx	TRK00000001	in_transit	2024-01-01
 
 # Test filtering by carrier
 query I
@@ -83,28 +83,28 @@ delivered	27
 in_transit	27
 
 # Test ORDER BY shipment_id
-query IIITTI
+query IIITTT
 SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
 FROM hms.sample_db.shipments
 ORDER BY shipment_id
 LIMIT 5;
 ----
-1	1	FedEx	TRK00000001	in_transit	19723
-2	2	UPS	TRK00000002	delivered	19726
-3	3	DHL	TRK00000003	delayed	19729
-4	4	USPS	TRK00000004	in_transit	19732
-5	5	FedEx	TRK00000005	delivered	19735
+1	1	FedEx	TRK00000001	in_transit	2024-01-01
+2	2	UPS	TRK00000002	delivered	2024-01-04
+3	3	DHL	TRK00000003	delayed	2024-01-07
+4	4	USPS	TRK00000004	in_transit	2024-01-10
+5	5	FedEx	TRK00000005	delivered	2024-01-13
 
 # Test ORDER BY ship_date DESC
-query ITI
+query ITT
 SELECT shipment_id, carrier, ship_date
 FROM hms.sample_db.shipments
 ORDER BY ship_date DESC
 LIMIT 3;
 ----
-80	USPS	19960
-79	DHL	19957
-78	UPS	19954
+80	USPS	2024-08-25
+79	DHL	2024-08-22
+78	UPS	2024-08-19
 
 # Test filtering by order_id IN clause
 query ITT
@@ -145,12 +145,12 @@ SELECT COUNT(DISTINCT status) FROM hms.sample_db.shipments;
 ----
 3
 
-# Test MIN/MAX dates (as integers - days since epoch)
-query II
+# Test MIN/MAX dates
+query TT
 SELECT MIN(ship_date) as min_date, MAX(ship_date) as max_date
 FROM hms.sample_db.shipments;
 ----
-19723	19960
+2024-01-01	2024-08-25
 
 # Test MIN/MAX shipment_id
 query II
@@ -189,12 +189,12 @@ UPS	20
 USPS	20
 
 # Test specific shipment details
-query IIITTI
+query IIITTT
 SELECT shipment_id, order_id, carrier, tracking_number, status, ship_date
 FROM hms.sample_db.shipments
 WHERE shipment_id = 50;
 ----
-50	50	UPS	TRK00000050	delivered	19870
+50	50	UPS	TRK00000050	delivered	2024-05-27
 
 # Test filtering by order_id range
 query I
@@ -218,20 +218,19 @@ LIMIT 5;
 43	DHL	in_transit
 55	DHL	in_transit
 
-# Test filtering by date range (using integer dates - days since epoch)
-# 19723 = 2024-01-01, 19754 = 2024-02-01
+# Test filtering by date range
 query I
 SELECT COUNT(*)
 FROM hms.sample_db.shipments
-WHERE ship_date >= 19723 AND ship_date < 19754;
+WHERE ship_date >= DATE '2024-01-01' AND ship_date < DATE '2024-02-01';
 ----
 11
 
-# Test date comparison (using integer)
+# Test date comparison
 query I
 SELECT COUNT(*)
 FROM hms.sample_db.shipments
-WHERE ship_date > 19813;
+WHERE ship_date > DATE '2024-03-31';
 ----
 49
 
@@ -241,6 +240,6 @@ SELECT COUNT(*)
 FROM hms.sample_db.shipments
 WHERE (carrier = 'FedEx' OR carrier = 'UPS')
   AND status != 'cancelled'
-  AND ship_date >= 19723;
+  AND ship_date >= DATE '2024-01-01';
 ----
 40
