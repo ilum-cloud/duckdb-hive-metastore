@@ -15,6 +15,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NETWORK="${NETWORK:-test_default}"
 IMAGE="${IMAGE:-hive-metastore-test-spark-seeder:latest}"
+# WHY: bidirectional mode is a manual exploration tool (Spark writes into a
+# DuckDB-created table and we re-verify). CI keeps default mode; users opt-in
+# with `VERIFY_MODE=bidirectional make spark-verify-writes`.
+# Valid values: `default` (read-only) or `bidirectional` (read + Spark INSERT).
+VERIFY_MODE="${VERIFY_MODE:-default}"
 
 # Resolve the actual docker network — compose names it after the project dir
 # (which is "test" in our case but could be overridden via COMPOSE_PROJECT_NAME).
@@ -39,4 +44,4 @@ exec docker run --rm \
     -v "${SCRIPT_DIR}/spark_verify_writes.py:/opt/spark/work-dir/spark_verify_writes.py:ro" \
     --entrypoint python3 \
     "$IMAGE" \
-    /opt/spark/work-dir/spark_verify_writes.py
+    /opt/spark/work-dir/spark_verify_writes.py --mode "$VERIFY_MODE"
