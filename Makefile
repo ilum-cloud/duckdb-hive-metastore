@@ -12,7 +12,7 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Hive Metastore integration test targets
-.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss spark-verify-writes
+.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss test-schema-drift spark-verify-writes
 
 # Main target: build, start env, run tests, stop env
 test-all: release
@@ -20,20 +20,23 @@ test-all: release
 	@echo "Running Hive Metastore Integration Tests"
 	@echo "========================================"
 	@echo ""
-	@echo "[1/5] Cleaning up any old containers..."
+	@echo "[1/6] Cleaning up any old containers..."
 	cd test && docker compose down -v --remove-orphans 2>/dev/null || true
 	@echo ""
-	@echo "[2/5] Starting Hive Metastore test environment..."
+	@echo "[2/6] Starting Hive Metastore test environment..."
 	cd test && docker compose up -d
 	@echo ""
-	@echo "[3/5] Waiting for Hive Metastore to be ready and seeded..."
+	@echo "[3/6] Waiting for Hive Metastore to be ready and seeded..."
 	cd test && docker compose wait spark-seeder
 	@echo "✓ Hive Metastore is ready and seeded with data"
 	@echo ""
-	@echo "[4/5] Applying oss:// metastore mutation for scheme-rewrite test..."
+	@echo "[4/6] Applying oss:// metastore mutation for scheme-rewrite test..."
 	bash test/sql/oss/post_seed_oss_mutation.sh
 	@echo ""
-	@echo "[5/5] Running tests..."
+	@echo "[5/6] Applying schema-drift mutation for schema_drift test..."
+	bash test/sql/oss/post_seed_schema_drift.sh
+	@echo ""
+	@echo "[6/6] Running tests..."
 	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
 	@echo ""
 	@echo "========================================"
@@ -63,6 +66,12 @@ test-run:
 # the test env is up; required for test/sql/oss/data_access_oss_scheme.test.
 test-mutate-oss:
 	bash test/sql/oss/post_seed_oss_mutation.sh
+
+# Apply a post-seed schema mutation (adds `drift_note` column to customers).
+# Idempotent. Run after test-env-start; required for
+# test/sql/oss/schema_drift.test.
+test-schema-drift:
+	bash test/sql/oss/post_seed_schema_drift.sh
 
 # Cross-engine verification: Spark reads back the tables DuckDB wrote.
 # Requires the docker-compose env to be running AND the DuckDB tests to have
