@@ -1,0 +1,114 @@
+# name: test/sql/parquet/insert_types_parquet.test
+# description: Type coverage for HMS Parquet INSERT — DATE, TIMESTAMP, DECIMAL,
+# group: [parquet]
+
+#              NULL, LIST, STRUCT. Each must round-trip through CREATE → INSERT
+#              → SELECT and survive a detach/reattach.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# A table covering scalar types most likely to surface SerDe/writer mismatches:
+# DATE and TIMESTAMP go through DuckDB's parquet logical-type path, DECIMAL has
+# precision/scale that must survive the Hive type string, and BOOLEAN/BLOB are
+# narrow types where a wrong Hive type would explode immediately.
+statement ok
+CREATE TABLE hms.sample_db.duck_types_parquet (
+    id INTEGER,
+    d DATE,
+    ts TIMESTAMP,
+    dec DECIMAL(12,3),
+    flag BOOLEAN,
+    payload BLOB
+) WITH (format='parquet', location='s3a://test-bucket/duck_types_parquet');
+
+statement ok
+INSERT INTO hms.sample_db.duck_types_parquet VALUES
+    (1, DATE '2024-01-15', TIMESTAMP '2024-01-15 12:34:56', 1234567.890, TRUE, '\x00\x01\x02'::BLOB),
+    (2, DATE '1999-12-31', TIMESTAMP '1999-12-31 23:59:59.999', -42.5, FALSE, NULL),
+    (3, NULL, NULL, NULL, NULL, NULL);
+
+# Scalar round-trip — exact values must come back, including the NULL row.
+query ITTTTT
+SELECT id, d, ts, dec, flag, payload FROM hms.sample_db.duck_types_parquet ORDER BY id;
+----
+1	2024-01-15	2024-01-15 12:34:56	1234567.890	true	\x00\x01\x02
+2	1999-12-31	1999-12-31 23:59:59.999	-42.500	false	NULL
+3	NULL	NULL	NULL	NULL	NULL
+
+# DECIMAL precision/scale must survive — the literal carries scale=3 and so must
+# the read-back value.
+query T
+SELECT typeof(dec) FROM hms.sample_db.duck_types_parquet WHERE id = 1;
+----
+DECIMAL(12,3)
+
+# Re-attach: the cold-load path (LoadEntries → DiscoverDynamicSchema) must return
+# the same types as the warm CreateTable path.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query T
+SELECT typeof(dec) FROM hms.sample_db.duck_types_parquet WHERE id = 1;
+----
+DECIMAL(12,3)
+
+query ITTTTT
+SELECT id, d, ts, dec, flag, payload FROM hms.sample_db.duck_types_parquet ORDER BY id;
+----
+1	2024-01-15	2024-01-15 12:34:56	1234567.890	true	\x00\x01\x02
+2	1999-12-31	1999-12-31 23:59:59.999	-42.500	false	NULL
+3	NULL	NULL	NULL	NULL	NULL
+
+# Complex types — LIST and STRUCT. The Hive type strings (`array<int>`,
+# `struct<a:int,b:varchar>`) must survive the round-trip and Spark-readable
+# parquet must be emitted.
+statement ok
+CREATE TABLE hms.sample_db.duck_complex_parquet (
+    id INTEGER,
+    tags INTEGER[],
+    info STRUCT(a INTEGER, b VARCHAR)
+) WITH (format='parquet', location='s3a://test-bucket/duck_complex_parquet');
+
+statement ok
+INSERT INTO hms.sample_db.duck_complex_parquet VALUES
+    (1, [1, 2, 3], {'a': 10, 'b': 'hello'}),
+    (2, [], {'a': 20, 'b': NULL}),
+    (3, NULL, NULL);
+
+query ITT
+SELECT id, tags, info FROM hms.sample_db.duck_complex_parquet ORDER BY id;
+----
+1	[1, 2, 3]	{'a': 10, 'b': hello}
+2	[]	{'a': 20, 'b': NULL}
+3	NULL	NULL
+
+# Re-attach to exercise the dynamic-schema discovery path on a complex-typed table.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query ITT
+SELECT id, tags, info FROM hms.sample_db.duck_complex_parquet ORDER BY id;
+----
+1	[1, 2, 3]	{'a': 10, 'b': hello}
+2	[]	{'a': 20, 'b': NULL}
+3	NULL	NULL

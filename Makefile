@@ -12,7 +12,7 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Hive Metastore integration test targets
-.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss
+.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss spark-verify-writes
 
 # Main target: build, start env, run tests, stop env
 test-all: release
@@ -63,6 +63,12 @@ test-run:
 # the test env is up; required for test/sql/oss/data_access_oss_scheme.test.
 test-mutate-oss:
 	bash test/sql/oss/post_seed_oss_mutation.sh
+
+# Cross-engine verification: Spark reads back the tables DuckDB wrote.
+# Requires the docker-compose env to be running AND the DuckDB tests to have
+# already populated the duck_* tables.
+spark-verify-writes:
+	bash test/spark_verify_writes.sh
 
 # Override tidy-check to ensure Thrift files are generated first
 .PHONY: tidy-check

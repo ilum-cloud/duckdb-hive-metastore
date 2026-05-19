@@ -73,6 +73,34 @@ SELECT id, name, score FROM hms.sample_db.duck_inserted_parquet WHERE id = 100;
 ----
 100	no-score	NULL
 
+# Multi-file verification: 4 INSERT statements ran above, so 4 distinct UUID-suffixed
+# files should exist. read_parquet with filename=true exposes the source path per row;
+# DISTINCT-counting it proves each INSERT produced its own file (no overwrites or appends).
+query I
+SELECT COUNT(DISTINCT filename) FROM read_parquet('s3://test-bucket/duck_inserted_parquet/*.parquet', filename=true);
+----
+4
+
+# Re-attach round-trip: detach the catalog and attach again so the table entry is
+# rebuilt from scratch via LoadEntries (cold path), not pulled from the warm in-process
+# entry created by the CREATE TABLE call. This catches schema/metadata divergence
+# between the two code paths.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_inserted_parquet;
+----
+10
+
+query III
+SELECT id, name, score FROM hms.sample_db.duck_inserted_parquet WHERE id = 100;
+----
+100	no-score	NULL
+
 # INSERT into Delta/Iceberg/Avro tables is still rejected — verify the error mentions the format.
 statement error
 INSERT INTO hms.sample_db.shipments VALUES (999, 999, 'X', 'X', 'X', DATE '2024-01-01');
