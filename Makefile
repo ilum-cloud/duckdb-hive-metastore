@@ -12,7 +12,7 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Hive Metastore integration test targets
-.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss test-schema-drift spark-verify-writes
+.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss test-schema-drift spark-verify-writes test-spark-verify
 
 # Main target: build, start env, run tests, stop env
 test-all: release
@@ -78,6 +78,39 @@ test-schema-drift:
 # already populated the duck_* tables.
 spark-verify-writes:
 	bash test/spark_verify_writes.sh
+
+# Full Spark cross-engine verification: bring env up, run DuckDB tests so
+# the duck_* tables get populated, then verify via Spark, then tear down.
+# Used by the spark-verify CI job.
+test-spark-verify: release
+	@echo "========================================"
+	@echo "Running Spark Cross-Engine Verification"
+	@echo "========================================"
+	@echo ""
+	@echo "[1/6] Cleaning up any old containers..."
+	cd test && docker compose down -v --remove-orphans 2>/dev/null || true
+	@echo ""
+	@echo "[2/6] Starting Hive Metastore test environment..."
+	cd test && docker compose up -d
+	@echo ""
+	@echo "[3/6] Waiting for Hive Metastore to be ready and seeded..."
+	cd test && docker compose wait spark-seeder
+	@echo "✓ Hive Metastore is ready and seeded with data"
+	@echo ""
+	@echo "[4/6] Applying post-seed HMS mutations..."
+	bash test/sql/oss/post_seed_oss_mutation.sh
+	bash test/sql/oss/post_seed_schema_drift.sh
+	@echo ""
+	@echo "[5/6] Running DuckDB tests (populates duck_* tables)..."
+	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
+	@echo ""
+	@echo "[6/6] Verifying via Spark..."
+	bash test/spark_verify_writes.sh
+	@echo ""
+	@echo "========================================"
+	@echo "Spark verification complete. Cleaning up..."
+	@echo "========================================"
+	cd test && docker compose down -v
 
 # Override tidy-check to ensure Thrift files are generated first
 .PHONY: tidy-check

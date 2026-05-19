@@ -1,0 +1,174 @@
+# name: test/sql/avro/avro_evolution.test
+# description: Avro re-attach round-trip and write-rejection contract
+# group: [avro]
+
+# Scope note: Avro INSERT is not supported (PlanHMSWrite in hms_catalog.cpp only handles Parquet
+# and CSV). DROP-and-recreate is the only "schema evolution" path available today.
+# Spark-ALTER + DuckDB-re-attach is not testable from sqllogictest because post-seed mutations
+# require a separate shell step outside the test runner.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require-env REMOTE_EXTENSIONS
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# --- Scenario 1: DETACH/ATTACH round-trip preserves schema ---
+# DATE, TIMESTAMP, and DECIMAL are the trickiest Avro types (logical-type mappings).
+# Create an empty table and verify that cold-loading via information_schema after each
+# re-attach returns the identical schema — no type degradation across cycles.
+
+statement ok
+CREATE TABLE hms.sample_db.duck_avro_evo (
+    id INTEGER,
+    label VARCHAR,
+    amount DECIMAL(10, 2),
+    event_date DATE,
+    event_ts TIMESTAMP
+) WITH (format='avro', location='s3a://test-bucket/duck_avro_evo');
+
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo'
+ORDER BY column_name;
+----
+amount	DECIMAL(10,2)
+event_date	DATE
+event_ts	TIMESTAMP
+id	INTEGER
+label	VARCHAR
+
+# First DETACH/ATTACH cycle.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo'
+ORDER BY column_name;
+----
+amount	DECIMAL(10,2)
+event_date	DATE
+event_ts	TIMESTAMP
+id	INTEGER
+label	VARCHAR
+
+# Second DETACH/ATTACH cycle — proves no degradation across multiple re-attaches.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo'
+ORDER BY column_name;
+----
+amount	DECIMAL(10,2)
+event_date	DATE
+event_ts	TIMESTAMP
+id	INTEGER
+label	VARCHAR
+
+# --- Scenario 2: INSERT into an Avro table is rejected ---
+# PlanHMSWrite throws NotImplementedException when format is not Parquet or CSV.
+# Expected error contains: "INSERT is not yet supported for the storage format"
+statement error
+INSERT INTO hms.sample_db.duck_avro_evo VALUES (1, 'x', 1.23, DATE '2024-01-01', TIMESTAMP '2024-01-01 00:00:00');
+----
+INSERT is not yet supported for the storage format
+
+# --- Scenario 3: CTAS targeting Avro format is also rejected ---
+# PlanCreateTableAs creates the HMS table entry first, then calls PlanHMSWrite which
+# throws. This leaves an orphan table in the metastore (same regression as ctas_orphan_metadata.test).
+statement error
+CREATE TABLE hms.sample_db.duck_avro_evo_ctas
+WITH (format='avro', location='s3a://test-bucket/duck_avro_evo_ctas')
+AS SELECT 1 AS id, 'hello' AS label;
+----
+INSERT is not yet supported for the storage format
+
+# REGRESSION-LOCK: PlanCreateTableAs registers the table in HMS before the write
+# executes. The Avro rejection above aborts the write but leaves the empty metadata
+# entry behind. When PlanCreateTableAs is fixed to roll back on write failure this
+# query will return 0 — flip the expected value and remove this comment.
+query I
+SELECT COUNT(*)
+FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo_ctas';
+----
+1
+
+# Clean up the orphan left by the failed CTAS.
+statement ok
+DROP TABLE hms.sample_db.duck_avro_evo_ctas;
+
+query I
+SELECT COUNT(*)
+FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo_ctas';
+----
+0
+
+# --- Scenario 4: DROP-and-recreate with a different schema ---
+# Avro INSERT is unsupported, so drop-and-recreate is the only "schema evolution" path.
+# Drop the original table, recreate it with an added column, and verify the new schema.
+statement ok
+DROP TABLE hms.sample_db.duck_avro_evo;
+
+statement ok
+CREATE TABLE hms.sample_db.duck_avro_evo (
+    id INTEGER,
+    label VARCHAR,
+    amount DECIMAL(10, 2),
+    event_date DATE,
+    event_ts TIMESTAMP,
+    extra_col BIGINT
+) WITH (format='avro', location='s3a://test-bucket/duck_avro_evo');
+
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo'
+ORDER BY column_name;
+----
+amount	DECIMAL(10,2)
+event_date	DATE
+event_ts	TIMESTAMP
+extra_col	BIGINT
+id	INTEGER
+label	VARCHAR
+
+# Verify column count changed (5 → 6) to confirm the new schema is active.
+query I
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo';
+----
+6
+
+# Clean up.
+statement ok
+DROP TABLE hms.sample_db.duck_avro_evo;
