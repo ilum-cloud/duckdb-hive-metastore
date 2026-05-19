@@ -47,10 +47,6 @@ void HMSTableSet::LoadEntries(ClientContext &context) {
 		CreateTableInfo info;
 		info.table = table.name;
 
-		// Check if this is an Avro table
-		bool is_avro =
-		    StringUtil::Contains(table.input_format, "Avro") || StringUtil::Contains(table.serialization_lib, "Avro");
-
 		// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
 		vector<ColumnDefinition> discovered_columns;
 		if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, table, discovered_columns)) {
@@ -65,24 +61,12 @@ void HMSTableSet::LoadEntries(ClientContext &context) {
 				for (auto &col : spark_columns) {
 					// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
 					auto logical_type = TransformStringToLogicalType(col.type, context);
-
-					// Apply Avro type mapping if this is an Avro table
-					if (is_avro) {
-						logical_type = HMSUtils::MapTypeForAvro(logical_type);
-					}
-
 					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
 				}
 			} else {
 				// Fallback to standard HMS columns
 				for (auto &col : table.columns) {
 					auto logical_type = HMSUtils::TypeToLogicalType(context, col.type);
-
-					// Apply Avro type mapping if this is an Avro table
-					if (is_avro) {
-						logical_type = HMSUtils::MapTypeForAvro(logical_type);
-					}
-
 					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
 				}
 			}
@@ -171,11 +155,7 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 	// attach table_data BEFORE schema resolution (needed for format detection)
 	result->table_data = make_uniq<HMSAPITable>(std::move(t));
 
-	// Resolve schema using the same logic as LoadEntries
-	// Check if this is an Avro table
-	bool is_avro = StringUtil::Contains(result->table_data->input_format, "Avro") ||
-	               StringUtil::Contains(result->table_data->serialization_lib, "Avro");
-
+	// Resolve schema using the same logic as LoadEntries.
 	// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
 	vector<ColumnDefinition> discovered_columns;
 	if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, *result->table_data, discovered_columns)) {
@@ -192,12 +172,6 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 			for (auto &col : spark_columns) {
 				// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
 				auto logical_type = TransformStringToLogicalType(col.type, context);
-
-				// Apply Avro type mapping if this is an Avro table
-				if (is_avro) {
-					logical_type = HMSUtils::MapTypeForAvro(logical_type);
-				}
-
 				result->create_info->columns.AddColumn(ColumnDefinition(col.name, logical_type));
 			}
 		} else {
@@ -205,12 +179,6 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 			result->create_info->columns = CreateTableInfo().columns; // clear and re-fill
 			for (auto &c : result->table_data->columns) {
 				auto logical_type = HMSUtils::TypeToLogicalType(context, c.type);
-
-				// Apply Avro type mapping if this is an Avro table
-				if (is_avro) {
-					logical_type = HMSUtils::MapTypeForAvro(logical_type);
-				}
-
 				result->create_info->columns.AddColumn(ColumnDefinition(c.name, logical_type));
 			}
 		}
@@ -280,16 +248,10 @@ optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, Boun
 		throw IOException("Failed to fetch table info after creating table '%s'", base.table);
 	}
 
-	// Register the new table entry in the catalog
-	CreateTableInfo create_info;
-	create_info.table = base.table;
-	// Populate columns using public ColumnList API
-	for (auto it = base.columns.Logical().begin(); it != base.columns.Logical().end(); ++it) {
-		create_info.columns.AddColumn((*it).Copy());
-	}
-
-	auto table_entry = make_uniq<HMSTableEntry>(catalog, schema, create_info);
-	// Set table_data from the fetched table info
+	// Register the new table entry in the catalog. Reuse the columns assembled by GetTableInfo
+	// rather than the user-declared columns so subsequent SELECTs see exactly what a re-attach
+	// would resolve from the HMS-stored schema.
+	auto table_entry = make_uniq<HMSTableEntry>(catalog, schema, *table_info);
 	if (table_info->table_data) {
 		table_entry->table_data = make_uniq<HMSAPITable>(*table_info->table_data);
 	}

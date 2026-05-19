@@ -76,6 +76,9 @@ constexpr const char *PARQUET_SERDE_LIB = "org.apache.hadoop.hive.ql.io.parquet.
 // Avro
 constexpr const char *AVRO_INPUT = "Avro";
 constexpr const char *AVRO_SERDE = "Avro";
+constexpr const char *AVRO_INPUT_FORMAT = "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat";
+constexpr const char *AVRO_OUTPUT_FORMAT = "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat";
+constexpr const char *AVRO_SERDE_LIB = "org.apache.hadoop.hive.serde2.avro.AvroSerDe";
 
 // Iceberg
 constexpr const char *ICEBERG_INPUT_FORMAT = "HiveIcebergInputFormat";
