@@ -1,0 +1,54 @@
+# name: test/sql/csv/insert_csv.test
+# description: Test INSERT and CREATE TABLE AS for HMS-managed CSV tables (non-partitioned)
+# group: [csv]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# CREATE empty CSV table.
+statement ok
+CREATE TABLE hms.sample_db.duck_inserted_csv (
+    id INTEGER,
+    label VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_inserted_csv');
+
+# INSERT VALUES.
+statement ok
+INSERT INTO hms.sample_db.duck_inserted_csv VALUES (1, 'alpha'), (2, 'bravo'), (3, 'charlie');
+
+query II
+SELECT id, label FROM hms.sample_db.duck_inserted_csv ORDER BY id;
+----
+1	alpha
+2	bravo
+3	charlie
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_inserted_csv;
+----
+3
+
+# CTAS into a CSV table.
+statement ok
+CREATE TABLE hms.sample_db.duck_ctas_csv
+WITH (format='csv', location='s3a://test-bucket/duck_ctas_csv')
+AS
+SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_ctas_csv;
+----
+5

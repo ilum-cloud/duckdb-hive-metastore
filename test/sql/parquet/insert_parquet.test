@@ -1,0 +1,80 @@
+# name: test/sql/parquet/insert_parquet.test
+# description: Test INSERT into HMS-managed Parquet tables (non-partitioned)
+# group: [parquet]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Create an empty Parquet table via HMS.
+statement ok
+CREATE TABLE hms.sample_db.duck_inserted_parquet (
+    id INTEGER,
+    name VARCHAR,
+    score DOUBLE
+) WITH (format='parquet', location='s3a://test-bucket/duck_inserted_parquet');
+
+# INSERT VALUES — the most basic write path.
+statement ok
+INSERT INTO hms.sample_db.duck_inserted_parquet VALUES (1, 'alpha', 1.5), (2, 'bravo', 2.5), (3, 'charlie', 3.5);
+
+# Round-trip: data should be readable back through the HMS scan path.
+query III
+SELECT id, name, score FROM hms.sample_db.duck_inserted_parquet ORDER BY id;
+----
+1	alpha	1.5
+2	bravo	2.5
+3	charlie	3.5
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_inserted_parquet;
+----
+3
+
+# A second INSERT must produce a different file (UUID-suffixed) rather than overwriting.
+statement ok
+INSERT INTO hms.sample_db.duck_inserted_parquet VALUES (4, 'delta', 4.5);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_inserted_parquet;
+----
+4
+
+# INSERT ... SELECT (deriving values from an existing HMS table)
+statement ok
+INSERT INTO hms.sample_db.duck_inserted_parquet
+SELECT customer_id AS id, first_name AS name, customer_id::DOUBLE AS score
+FROM hms.sample_db.customers
+WHERE customer_id <= 5;
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_inserted_parquet;
+----
+9
+
+# Partial-column INSERT — omitted columns default to NULL.
+statement ok
+INSERT INTO hms.sample_db.duck_inserted_parquet (id, name) VALUES (100, 'no-score');
+
+query III
+SELECT id, name, score FROM hms.sample_db.duck_inserted_parquet WHERE id = 100;
+----
+100	no-score	NULL
+
+# INSERT into Delta/Iceberg/Avro tables is still rejected — verify the error mentions the format.
+statement error
+INSERT INTO hms.sample_db.shipments VALUES (999, 999, 'X', 'X', 'X', DATE '2024-01-01');
+----
+INSERT
