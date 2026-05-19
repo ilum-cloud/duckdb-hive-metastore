@@ -1,0 +1,94 @@
+# name: test/sql/parquet/ctas_orphan_metadata.test
+# description: Regression lock for orphan HMS metadata left behind by a failed CTAS
+# group: [parquet]
+
+# REGRESSION-LOCK: PlanCreateTableAs in src/storage/hms_catalog.cpp materializes the
+# HMS table BEFORE the write executes. When the write fails the metadata stays
+# behind. This file pins that current (buggy) behavior. When PlanCreateTableAs is
+# fixed to roll back metadata on write failure, the queries that assert COUNT(*) = 1
+# will return 0 instead — flip the expected value and remove these comments.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Force CTAS to fail during execution (divide-by-zero happens after HMS CreateTable
+# already ran at plan time, so the metastore entry is created before the error).
+statement error
+CREATE TABLE hms.sample_db.duck_orphan_div0
+WITH (location='s3a://test-bucket/duck_orphan_div0')
+AS
+SELECT customer_id, 1/0 AS bad FROM hms.sample_db.customers LIMIT 5;
+----
+
+# REGRESSION-LOCK: PlanCreateTableAs registers the table in HMS before the SELECT
+# executes. The divide-by-zero above aborts the write, but the empty table entry
+# remains. When PlanCreateTableAs is fixed to roll back on write failure this query
+# will return 0 — flip the expected value and remove this comment.
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_div0';
+----
+1
+
+# DROP TABLE removes the orphan and the catalog entry is gone.
+statement ok
+DROP TABLE hms.sample_db.duck_orphan_div0;
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_div0';
+----
+0
+
+# Verify that a fresh failed CTAS produces a persistent orphan that survives a
+# DETACH / ATTACH round-trip (i.e. the orphan is stored in the metastore, not just
+# cached in-process).
+statement error
+CREATE TABLE hms.sample_db.duck_orphan_persist
+WITH (location='s3a://test-bucket/duck_orphan_persist')
+AS
+SELECT customer_id, 1/0 AS bad FROM hms.sample_db.customers LIMIT 5;
+----
+
+# REGRESSION-LOCK: same as above — orphan exists before re-attach.
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_persist';
+----
+1
+
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# REGRESSION-LOCK: orphan survives re-attach because it is stored in the metastore.
+# When PlanCreateTableAs rolls back on failure, this will return 0.
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_persist';
+----
+1
+
+statement ok
+DROP TABLE hms.sample_db.duck_orphan_persist;
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_persist';
+----
+0
