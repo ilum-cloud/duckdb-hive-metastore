@@ -1,0 +1,95 @@
+# name: test/sql/basic/format_detector_ambiguity.test
+# description: Pins format-string normalization in BuildThriftTable: Lower() + Trim() + empty→parquet default.
+# group: [basic]
+
+#   The normalization contract (src/hms_utils.cpp) is:
+#     1. StringUtil::Lower(format)  — case-insensitive acceptance
+#     2. StringUtil::Trim(fmt)      — whitespace-padded strings resolve to the bare name
+#     3. empty string → default to Parquet
+#   Each scenario below exercises one branch and proves the correct write path runs
+#   via INSERT + SELECT rather than stopping at catalog registration.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Scenario 1: mixed-case format='PARQUET' — Lower() maps it to 'parquet'.
+# INSERT + SELECT proves the Parquet write path is active, not just that the table was created.
+statement ok
+CREATE TABLE hms.sample_db.duck_fmt_upper_parquet (id INTEGER, label VARCHAR)
+WITH (location='s3a://test-bucket/duck_fmt_upper_parquet/', format='PARQUET');
+
+statement ok
+INSERT INTO hms.sample_db.duck_fmt_upper_parquet VALUES (1, 'alpha'), (2, 'bravo');
+
+query II
+SELECT id, label FROM hms.sample_db.duck_fmt_upper_parquet ORDER BY id;
+----
+1	alpha
+2	bravo
+
+# Scenario 2: whitespace-padded format='  csv  ' — Trim() strips surrounding spaces.
+# INSERT + SELECT proves the CSV write path ran correctly.
+statement ok
+CREATE TABLE hms.sample_db.duck_fmt_padded_csv (id INTEGER, label VARCHAR)
+WITH (location='s3a://test-bucket/duck_fmt_padded_csv/', format='  csv  ');
+
+statement ok
+INSERT INTO hms.sample_db.duck_fmt_padded_csv VALUES (10, 'x'), (20, 'y');
+
+query II
+SELECT id, label FROM hms.sample_db.duck_fmt_padded_csv ORDER BY id;
+----
+10	x
+20	y
+
+# Scenario 3: explicit empty string format='' — after Lower+Trim the value is empty,
+# so BuildThriftTable defaults it to Parquet. This is distinct from omitting the key
+# entirely (tested in create_table_options.test via duck_create_managed).
+statement ok
+CREATE TABLE hms.sample_db.duck_fmt_empty (id INTEGER, label VARCHAR)
+WITH (location='s3a://test-bucket/duck_fmt_empty/', format='');
+
+statement ok
+INSERT INTO hms.sample_db.duck_fmt_empty VALUES (100, 'empty-default');
+
+query II
+SELECT id, label FROM hms.sample_db.duck_fmt_empty ORDER BY id;
+----
+100	empty-default
+
+# DETACH/ATTACH round-trip: confirms all three tables survived HMS persistence.
+# If format metadata was stored incorrectly the re-attach would fail to resolve
+# the storage descriptor and the SELECTs would error or return 0 rows.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_fmt_upper_parquet;
+----
+2
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_fmt_padded_csv;
+----
+2
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_fmt_empty;
+----
+1

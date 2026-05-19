@@ -1,0 +1,92 @@
+# name: test/sql/basic/attach_reattach_restart.test
+# description: Prove HMS metadata survives a true sqllogictest process restart.
+# group: [basic]
+
+# Unlike DETACH/ATTACH (which evicts and rebuilds the in-process catalog entry),
+# restart tears down the entire DuckDB process and reopens the database file.
+# All session state — loaded extensions, secrets, attached catalogs — is gone.
+# HMS state is stored externally in the Thrift server, so it must be retrievable
+# by a completely fresh DuckDB instance. This test verifies that property.
+#
+# load is required: restart throws on in-memory databases.
+
+load __TEST_DIR__/attach_reattach_restart
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+statement ok
+CREATE TABLE hms.sample_db.duck_restart_persist (id INTEGER, name VARCHAR)
+WITH (format='parquet', location='s3a://test-bucket/duck_restart_persist/');
+
+statement ok
+INSERT INTO hms.sample_db.duck_restart_persist VALUES (1, 'before-restart'), (2, 'still-here');
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_restart_persist;
+----
+2
+
+# --- First restart ---
+# DuckDB process is restarted. All session state is discarded.
+# The local .db file is empty but HMS still holds the table registration.
+restart
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Table and data registered before restart must still be visible via a fresh HMS scan.
+query II
+SELECT id, name FROM hms.sample_db.duck_restart_persist ORDER BY id;
+----
+1	before-restart
+2	still-here
+
+# Write new data after the first restart to exercise the write path on a fresh session.
+statement ok
+INSERT INTO hms.sample_db.duck_restart_persist VALUES (3, 'post-restart-write');
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_restart_persist;
+----
+3
+
+# --- Second restart ---
+# Restart again to prove multi-restart resilience and that data written between
+# two restarts also survives.
+restart
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# All three rows — including the one written between the two restarts — must be present.
+query II
+SELECT id, name FROM hms.sample_db.duck_restart_persist ORDER BY id;
+----
+1	before-restart
+2	still-here
+3	post-restart-write
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_restart_persist;
+----
+3

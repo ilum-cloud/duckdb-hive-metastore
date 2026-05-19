@@ -1,0 +1,215 @@
+# name: test/sql/csv/insert_types_csv.test
+# description: Type coverage for HMS CSV INSERT — DATE, TIMESTAMP, DECIMAL, BOOLEAN,
+# group: [csv]
+
+#              integer types, float/double, and mixed scalars. Each must round-trip
+#              through CREATE → INSERT → SELECT. BLOB, LIST, and STRUCT are omitted
+#              because CSV cannot represent binary or nested data cleanly.
+#
+#              Scalar types round-trip cleanly through CSV because the writer emits
+#              the canonical text representation and the column type drives the cast
+#              on read — no schema information is lost between write and read.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# --- Scenario 1: DATE ---
+# DATE serializes as YYYY-MM-DD text; the column type on read casts it back exactly.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_date (
+    id INTEGER,
+    d DATE
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_date');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_date VALUES
+    (1, DATE '2024-06-15'),
+    (2, NULL);
+
+query IT
+SELECT id, d FROM hms.sample_db.duck_csvtype_date ORDER BY id;
+----
+1	2024-06-15
+2	NULL
+
+# --- Scenario 2: TIMESTAMP ---
+# TIMESTAMP serializes as ISO-8601 text; round-trip is exact for microsecond precision.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_ts (
+    id INTEGER,
+    ts TIMESTAMP
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_ts');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_ts VALUES
+    (1, TIMESTAMP '2024-03-20 08:30:00'),
+    (2, NULL);
+
+query IT
+SELECT id, ts FROM hms.sample_db.duck_csvtype_ts ORDER BY id;
+----
+1	2024-03-20 08:30:00
+2	NULL
+
+# --- Scenario 3: DECIMAL(12,3) ---
+# The CSV writer emits the canonical decimal representation; the column type (DECIMAL(12,3))
+# drives the cast on read, so precision and scale survive the round-trip.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_dec (
+    id INTEGER,
+    dec DECIMAL(12,3)
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_dec');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_dec VALUES
+    (1, 123.456),
+    (2, NULL);
+
+query IT
+SELECT id, dec FROM hms.sample_db.duck_csvtype_dec ORDER BY id;
+----
+1	123.456
+2	NULL
+
+query T
+SELECT typeof(dec) FROM hms.sample_db.duck_csvtype_dec WHERE id = 1;
+----
+DECIMAL(12,3)
+
+# --- Scenario 4: BOOLEAN ---
+# TRUE/FALSE/NULL all have unambiguous text representations.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_bool (
+    id INTEGER,
+    flag BOOLEAN
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_bool');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_bool VALUES
+    (1, TRUE),
+    (2, FALSE),
+    (3, NULL);
+
+query IT
+SELECT id, flag FROM hms.sample_db.duck_csvtype_bool ORDER BY id;
+----
+1	true
+2	false
+3	NULL
+
+# --- Scenario 5: TINYINT / SMALLINT / INTEGER / BIGINT ---
+# Integer extremes written as text; exact round-trip because no precision is involved.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_ints (
+    id INTEGER,
+    ti TINYINT,
+    si SMALLINT,
+    ii INTEGER,
+    bi BIGINT
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_ints');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_ints VALUES
+    (1, -128, -32768, -2147483648, -9223372036854775808),
+    (2,  127,  32767,  2147483647,  9223372036854775807),
+    (3, NULL,   NULL,        NULL,                 NULL);
+
+query ITTTT
+SELECT id, ti, si, ii, bi FROM hms.sample_db.duck_csvtype_ints ORDER BY id;
+----
+1	-128	-32768	-2147483648	-9223372036854775808
+2	127	32767	2147483647	9223372036854775807
+3	NULL	NULL	NULL	NULL
+
+# --- Scenario 6: FLOAT / DOUBLE ---
+# 1.5 and 3.14159265358979 are chosen because they have exact or near-exact IEEE 754
+# representations, so the text serialization round-trips without visible precision loss.
+# For arbitrary decimals, FLOAT/DOUBLE can lose precision through the text path.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_floats (
+    id INTEGER,
+    f FLOAT,
+    d DOUBLE
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_floats');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_floats VALUES
+    (1, 1.5, 3.14159265358979),
+    (2, NULL, NULL);
+
+query ITT
+SELECT id, f, d FROM hms.sample_db.duck_csvtype_floats ORDER BY id;
+----
+1	1.5	3.14159265358979
+2	NULL	NULL
+
+# --- Scenario 7: mixed scalars (id INT, name VARCHAR, score DOUBLE, joined DATE) ---
+# Three rows including one all-NULL row; verifies that multi-column CSV tables with
+# mixed types produce correct per-column casts on read.
+# VARCHAR values must not contain commas or quotes (strict-mode reader limitation).
+statement ok
+CREATE TABLE hms.sample_db.duck_csvtype_mixed (
+    id INTEGER,
+    name VARCHAR,
+    score DOUBLE,
+    joined DATE
+) WITH (format='csv', location='s3a://test-bucket/duck_csvtype_mixed');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvtype_mixed VALUES
+    (1, 'alice', 9.5, DATE '2023-01-10'),
+    (2, 'bob',   7.0, DATE '2022-06-30'),
+    (3, NULL,   NULL, NULL);
+
+query ITTT
+SELECT id, name, score, joined FROM hms.sample_db.duck_csvtype_mixed ORDER BY id;
+----
+1	alice	9.5	2023-01-10
+2	bob	7.0	2022-06-30
+3	NULL	NULL	NULL
+
+# --- DETACH / ATTACH round-trip ---
+# Verifies that DATE, TIMESTAMP, DECIMAL types are persisted in HMS and survive
+# catalog eviction. The cold-load path (LoadEntries → DiscoverDynamicSchema) must
+# return the same types as the warm CreateTable path.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query IT
+SELECT id, d FROM hms.sample_db.duck_csvtype_date ORDER BY id;
+----
+1	2024-06-15
+2	NULL
+
+query IT
+SELECT id, ts FROM hms.sample_db.duck_csvtype_ts ORDER BY id;
+----
+1	2024-03-20 08:30:00
+2	NULL
+
+query IT
+SELECT id, dec FROM hms.sample_db.duck_csvtype_dec ORDER BY id;
+----
+1	123.456
+2	NULL
+
+query T
+SELECT typeof(dec) FROM hms.sample_db.duck_csvtype_dec WHERE id = 1;
+----
+DECIMAL(12,3)
