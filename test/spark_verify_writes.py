@@ -122,9 +122,7 @@ def run_bidirectional_append(spark):
     table = f"sample_db.{BIDIRECTIONAL_TABLE}"
 
     try:
-        spark.sql(
-            f"INSERT INTO {table} VALUES (99, 'spark_added_1', 9.9), (100, 'spark_added_2', 10.10)"
-        )
+        spark.sql(f"INSERT INTO {table} VALUES (99, 'spark_added_1', 9.9), (100, 'spark_added_2', 10.10)")
     except Exception as exc:
         failures.append(f"bidirectional: Spark INSERT into {table} failed — {exc}")
         return failures
@@ -137,8 +135,7 @@ def run_bidirectional_append(spark):
 
     if post_count != BIDIRECTIONAL_EXPECTED_TOTAL:
         failures.append(
-            f"bidirectional: expected {BIDIRECTIONAL_EXPECTED_TOTAL} rows after Spark append, "
-            f"got {post_count}"
+            f"bidirectional: expected {BIDIRECTIONAL_EXPECTED_TOTAL} rows after Spark append, " f"got {post_count}"
         )
         return failures
 

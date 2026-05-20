@@ -567,9 +567,7 @@ def main():
     # DROP TABLE removes HMS metadata only; external-table data files survive on S3
     # unless explicitly deleted.
     hadoop_conf = spark._jsc.hadoopConfiguration()
-    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(
-        spark._jvm.java.net.URI.create(writable_path), hadoop_conf
-    )
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(writable_path), hadoop_conf)
     hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(writable_path)
     if fs.exists(hadoop_path):
         fs.delete(hadoop_path, True)
@@ -591,19 +589,19 @@ def main():
     # exercising the cross-engine append path.
     print("\n[13/15] Creating 'cross_engine_parquet' table (Parquet, 10 Spark-written rows)...")
     cross_data = [(i, f"spark_row_{i}", float(i) * 1.5) for i in range(1, 11)]
-    cross_schema = StructType([
-        StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
-        StructField("score", DoubleType(), True),
-    ])
+    cross_schema = StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("name", StringType(), True),
+            StructField("score", DoubleType(), True),
+        ]
+    )
     cross_df = spark.createDataFrame(cross_data, cross_schema)
     cross_path = "s3a://test-bucket/cross_engine_parquet/"
 
     # Clear any prior content so re-runs see exactly 10 rows initially.
     hadoop_conf = spark._jsc.hadoopConfiguration()
-    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(
-        spark._jvm.java.net.URI.create(cross_path), hadoop_conf
-    )
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(cross_path), hadoop_conf)
     hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(cross_path)
     if fs.exists(hadoop_path):
         fs.delete(hadoop_path, True)
