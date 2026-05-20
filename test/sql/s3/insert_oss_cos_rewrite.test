@@ -1,9 +1,10 @@
 # name: test/sql/s3/insert_oss_cos_rewrite.test
 # description: Test that DuckDB INSERT into tables whose HMS LOCATION uses oss:// or cos://
+# group: [s3]
+
 #              rewrites those schemes to s3:// at write time via PathUtils::RewriteS3CompatibleScheme,
 #              and that the written data is readable both via the HMS catalog entry and directly
 #              via the s3:// path in MinIO.
-# group: [s3]
 
 require hive_metastore
 

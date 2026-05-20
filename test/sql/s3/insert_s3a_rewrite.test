@@ -1,8 +1,9 @@
 # name: test/sql/s3/insert_s3a_rewrite.test
 # description: Test that DuckDB INSERT into a Spark-created s3a:// Parquet table rewrites the
+# group: [s3]
+
 #              path to s3:// at write time (via PathUtils) and that both the direct s3:// read
 #              and the HMS scan path agree on the written data.
-# group: [s3]
 
 require hive_metastore
 
