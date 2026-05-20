@@ -22,36 +22,41 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
-# Both tables were seeded by test/seed_hive_data_spark.py with oss:// and cos:// LOCATIONs.
-# HMS stores these as opaque URI strings. No data was seeded — DuckDB writes the first files.
-# PathUtils::RewriteS3CompatibleScheme maps oss:// → s3:// and cos:// → s3:// so that
-# DuckDB's httpfs S3 layer (which only understands s3://) can reach the MinIO backend.
+# The oss:// and cos:// tables are CREATEd here rather than seeded by Spark.
+# Spark's bundled Hadoop runtime in test/Dockerfile.spark lacks hadoop-aliyun (oss)
+# and hadoop-cos jars, so a Spark CREATE EXTERNAL TABLE with one of those LOCATION
+# schemes blows up at FileSystem.get(oss://) with ClassNotFoundException.
+# DuckDB's HMS extension stores LOCATION verbatim and only rewrites the scheme at
+# I/O time via PathUtils::RewriteS3CompatibleScheme (oss:// → s3:// and cos:// →
+# s3://). The bucket and key path are preserved, so files land in MinIO at
+# s3://test-bucket/duck_oss_rewrite/ and s3://test-bucket/duck_cos_rewrite/.
 
 # ─── oss:// table ────────────────────────────────────────────────────────────
 
-# Verify the oss:// table exists and is empty before the test writes anything.
-query I
-SELECT COUNT(*) FROM hms.sample_db.spark_writable_oss;
-----
-0
+statement ok
+CREATE TABLE hms.sample_db.duck_oss_rewrite (
+    id INTEGER,
+    name VARCHAR,
+    score DOUBLE
+) WITH (format='parquet', location='oss://test-bucket/duck_oss_rewrite/');
 
 # INSERT 3 rows. PathUtils rewrites the HMS-stored oss:// LOCATION to s3:// before
 # passing it to the S3 FileSystem, so the write lands in MinIO under test-bucket.
 statement ok
-INSERT INTO hms.sample_db.spark_writable_oss VALUES
+INSERT INTO hms.sample_db.duck_oss_rewrite VALUES
     (1, 'duck_oss_a', 1.1),
     (2, 'duck_oss_b', 2.2),
     (3, 'duck_oss_c', 3.3);
 
 # Verify row count via HMS scan (proves the extension reads the file it just wrote).
 query I
-SELECT COUNT(*) FROM hms.sample_db.spark_writable_oss;
+SELECT COUNT(*) FROM hms.sample_db.duck_oss_rewrite;
 ----
 3
 
 # Read back content via HMS scan to confirm values are intact.
 query ITR
-SELECT id, name, score FROM hms.sample_db.spark_writable_oss ORDER BY id;
+SELECT id, name, score FROM hms.sample_db.duck_oss_rewrite ORDER BY id;
 ----
 1	duck_oss_a	1.1
 2	duck_oss_b	2.2
@@ -60,12 +65,12 @@ SELECT id, name, score FROM hms.sample_db.spark_writable_oss ORDER BY id;
 # Direct s3:// read — proves the oss→s3 rewrite happened on WRITE (the file lives at s3://).
 # The MinIO bucket is test-bucket regardless of the original scheme; only the scheme changes.
 query I
-SELECT COUNT(*) FROM read_parquet('s3://test-bucket/spark_writable_oss/*.parquet');
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/duck_oss_rewrite/*.parquet');
 ----
 3
 
 query ITR
-SELECT id, name, score FROM read_parquet('s3://test-bucket/spark_writable_oss/*.parquet') ORDER BY id;
+SELECT id, name, score FROM read_parquet('s3://test-bucket/duck_oss_rewrite/*.parquet') ORDER BY id;
 ----
 1	duck_oss_a	1.1
 2	duck_oss_b	2.2
@@ -73,29 +78,30 @@ SELECT id, name, score FROM read_parquet('s3://test-bucket/spark_writable_oss/*.
 
 # ─── cos:// table ────────────────────────────────────────────────────────────
 
-# Verify the cos:// table exists and is empty before the test writes anything.
-query I
-SELECT COUNT(*) FROM hms.sample_db.spark_writable_cos;
-----
-0
+statement ok
+CREATE TABLE hms.sample_db.duck_cos_rewrite (
+    id INTEGER,
+    name VARCHAR,
+    score DOUBLE
+) WITH (format='parquet', location='cos://test-bucket/duck_cos_rewrite/');
 
 # INSERT 3 rows. PathUtils rewrites the HMS-stored cos:// LOCATION to s3:// before
 # passing it to the S3 FileSystem, so the write lands in MinIO under test-bucket.
 statement ok
-INSERT INTO hms.sample_db.spark_writable_cos VALUES
+INSERT INTO hms.sample_db.duck_cos_rewrite VALUES
     (1, 'duck_cos_a', 1.1),
     (2, 'duck_cos_b', 2.2),
     (3, 'duck_cos_c', 3.3);
 
 # Verify row count via HMS scan (proves the extension reads the file it just wrote).
 query I
-SELECT COUNT(*) FROM hms.sample_db.spark_writable_cos;
+SELECT COUNT(*) FROM hms.sample_db.duck_cos_rewrite;
 ----
 3
 
 # Read back content via HMS scan to confirm values are intact.
 query ITR
-SELECT id, name, score FROM hms.sample_db.spark_writable_cos ORDER BY id;
+SELECT id, name, score FROM hms.sample_db.duck_cos_rewrite ORDER BY id;
 ----
 1	duck_cos_a	1.1
 2	duck_cos_b	2.2
@@ -103,12 +109,12 @@ SELECT id, name, score FROM hms.sample_db.spark_writable_cos ORDER BY id;
 
 # Direct s3:// read — proves the cos→s3 rewrite happened on WRITE (the file lives at s3://).
 query I
-SELECT COUNT(*) FROM read_parquet('s3://test-bucket/spark_writable_cos/*.parquet');
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/duck_cos_rewrite/*.parquet');
 ----
 3
 
 query ITR
-SELECT id, name, score FROM read_parquet('s3://test-bucket/spark_writable_cos/*.parquet') ORDER BY id;
+SELECT id, name, score FROM read_parquet('s3://test-bucket/duck_cos_rewrite/*.parquet') ORDER BY id;
 ----
 1	duck_cos_a	1.1
 2	duck_cos_b	2.2

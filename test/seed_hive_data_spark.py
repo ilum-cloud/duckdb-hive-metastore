@@ -403,25 +403,25 @@ def main():
     print("=" * 80)
 
     # Create Spark session
-    print("\n[1/15] Creating Spark session with Hive and S3 support...")
+    print("\n[1/13] Creating Spark session with Hive and S3 support...")
     spark = create_spark_session()
     print("✓ Spark session created successfully")
 
     # Create database
-    print("\n[2/15] Creating database 'sample_db'...")
+    print("\n[2/13] Creating database 'sample_db'...")
     spark.sql("CREATE DATABASE IF NOT EXISTS sample_db")
     spark.sql("USE sample_db")
     print("✓ Database 'sample_db' created and selected")
 
     # Create and save Customers table (Parquet - default format)
-    print("\n[3/15] Creating 'customers' table in Parquet format...")
+    print("\n[3/13] Creating 'customers' table in Parquet format...")
     customers_df = create_sample_customers_data(spark, num_rows=100)
     customers_df.write.mode("overwrite").format("parquet").saveAsTable("sample_db.customers")
     print(f"✓ Created 'customers' table with {customers_df.count()} rows in Parquet format")
     print(f"   Location: s3a://test-bucket/sample_db.db/customers/")
 
     # Create and save Products table (Delta format)
-    print("\n[4/15] Creating 'products' table in Delta format...")
+    print("\n[4/13] Creating 'products' table in Delta format...")
     products_df = create_sample_products_data(spark, num_rows=50)
 
     # Drop table if exists to avoid truncate mode issues with Delta
@@ -441,7 +441,7 @@ def main():
     print(f"   Location: {delta_path}")
 
     # Create and save Orders table (CSV format)
-    print("\n[5/15] Creating 'orders' table in CSV format...")
+    print("\n[5/13] Creating 'orders' table in CSV format...")
     orders_df = create_sample_orders_data(spark, num_rows=200)
 
     # First save as CSV to S3
@@ -469,14 +469,14 @@ def main():
     print(f"   Location: {csv_path}")
 
     # Create and save Reviews table (Parquet with partitioning)
-    print("\n[6/15] Creating 'reviews' table in Parquet format with partitioning...")
+    print("\n[6/13] Creating 'reviews' table in Parquet format with partitioning...")
     reviews_df = create_sample_reviews_data(spark, num_rows=150)
     reviews_df.write.mode("overwrite").format("parquet").partitionBy("rating").saveAsTable("sample_db.reviews")
     print(f"✓ Created 'reviews' table with {reviews_df.count()} rows in Parquet format (partitioned by rating)")
     print(f"   Location: s3a://test-bucket/sample_db.db/reviews/")
 
     # Create and save Inventory table (Iceberg format) - if Iceberg is available
-    print("\n[7/15] Creating 'inventory' table in Iceberg format...")
+    print("\n[7/13] Creating 'inventory' table in Iceberg format...")
     try:
         inventory_df = create_sample_inventory_data(spark, num_rows=75)
 
@@ -502,7 +502,7 @@ def main():
         traceback.print_exc()
 
     # Create and save Shipments table (Avro format)
-    print("\n[8/15] Creating 'shipments' table in Avro format...")
+    print("\n[8/13] Creating 'shipments' table in Avro format...")
     try:
         shipments_df = create_sample_shipments_data(spark, num_rows=80)
 
@@ -529,7 +529,7 @@ def main():
         print(f"⚠ Skipped 'shipments' table (Avro): {str(e)[:100]}")
 
     # Create and save type_test table (Parquet with diverse types)
-    print("\n[9/15] Creating 'type_test' table in Parquet format with diverse types...")
+    print("\n[9/13] Creating 'type_test' table in Parquet format with diverse types...")
     type_test_df = create_sample_type_test_data(spark, num_rows=100)
     type_test_df.write.mode("overwrite").format("parquet").saveAsTable("sample_db.type_test")
     print(f"✓ Created 'type_test' table with {type_test_df.count()} rows in Parquet format")
@@ -538,7 +538,7 @@ def main():
     print("          BOOLEAN, TIMESTAMP, BINARY, VARCHAR")
 
     # Create and save decimal_partitioned table (Parquet partitioned by DECIMAL)
-    print("\n[10/15] Creating 'decimal_partitioned' table in Parquet format (partitioned by DECIMAL)...")
+    print("\n[10/13] Creating 'decimal_partitioned' table in Parquet format (partitioned by DECIMAL)...")
     decimal_partitioned_df = create_sample_decimal_partitioned_data(spark, num_rows=50)
     decimal_partitioned_df.write.mode("overwrite").format("parquet").partitionBy("amount").saveAsTable(
         "sample_db.decimal_partitioned"
@@ -548,7 +548,7 @@ def main():
     print("   Partitioned by: amount (DECIMAL(10,2)) - tests problematic partition type")
 
     # Create and save multi_partition table (Parquet partitioned by multiple columns)
-    print("\n[11/15] Creating 'multi_partition' table in Parquet format (partitioned by year, month, region)...")
+    print("\n[11/13] Creating 'multi_partition' table in Parquet format (partitioned by year, month, region)...")
     multi_partition_df = create_sample_multi_partition_data(spark, num_rows=60)
     multi_partition_df.write.mode("overwrite").format("parquet").partitionBy("year", "month", "region").saveAsTable(
         "sample_db.multi_partition"
@@ -560,7 +560,7 @@ def main():
     # Empty external Parquet table for DuckDB write-path tests (used by test/sql/s3/insert_s3a_rewrite.test).
     # Location is intentionally outside sample_db.db/ — this is an external table used as a
     # DuckDB write target, not a warehouse-managed table.
-    print("\n[12/15] Creating EMPTY 'spark_writable_parquet' for DuckDB write-tests...")
+    print("\n[12/13] Creating EMPTY 'spark_writable_parquet' for DuckDB write-tests...")
     writable_path = "s3a://test-bucket/spark_writable_parquet/"
 
     # Clear any prior files at the writable path so the table truly starts empty.
@@ -585,9 +585,9 @@ def main():
     print("✓ Created empty 'spark_writable_parquet' (target for DuckDB INSERT tests)")
     print(f"   Location: {writable_path}")
 
-    # [13/15] Seeded Parquet table that DuckDB INSERTs additional rows into,
+    # [13/13] Seeded Parquet table that DuckDB INSERTs additional rows into,
     # exercising the cross-engine append path.
-    print("\n[13/15] Creating 'cross_engine_parquet' table (Parquet, 10 Spark-written rows)...")
+    print("\n[13/13] Creating 'cross_engine_parquet' table (Parquet, 10 Spark-written rows)...")
     cross_data = [(i, f"spark_row_{i}", float(i) * 1.5) for i in range(1, 11)]
     cross_schema = StructType(
         [
@@ -620,64 +620,12 @@ def main():
     print(f"✓ Created 'cross_engine_parquet' table with 10 rows (Spark-written, DuckDB will INSERT more)")
     print(f"   Location: {cross_path}")
 
-    # Create empty external Parquet tables with oss:// and cos:// LOCATION URIs.
-    # These schemes are not supported by Spark's Hadoop FS layer, so we cannot write
-    # data through Spark. The tables are purely symbolic: HMS stores the LOCATION as-is
-    # (an opaque string), which is sufficient for DuckDB to pick them up and exercise
-    # PathUtils::RewriteS3CompatibleScheme (oss→s3 and cos→s3) on INSERT/scan.
-    #
-    # Spark accepts non-s3a LOCATION strings for external tables without validating
-    # the scheme — it only stores them in the Hive Metastore. No Hadoop FS operation
-    # is performed for the CREATE EXTERNAL TABLE call itself.
-    #
-    # DuckDB rewrites oss:// → s3:// and cos:// → s3:// at write time, so the actual
-    # files land at s3://test-bucket/spark_writable_oss/ and s3://test-bucket/spark_writable_cos/.
-    # Hadoop FS cannot address s3:// directly, but the same bucket/key is reachable via
-    # s3a://. We delete those s3a:// paths so re-seeding leaves the tables empty and the
-    # test's initial COUNT(*) = 0 assertion holds on repeated runs.
-
-    oss_path = "oss://test-bucket/spark_writable_oss/"
-    cos_path = "cos://test-bucket/spark_writable_cos/"
-    # s3a:// equivalents of the oss/cos paths, used for Hadoop FS cleanup only.
-    oss_s3a_path = "s3a://test-bucket/spark_writable_oss/"
-    cos_s3a_path = "s3a://test-bucket/spark_writable_cos/"
-
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    for s3a_cleanup_path in (oss_s3a_path, cos_s3a_path):
-        fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(
-            spark._jvm.java.net.URI.create(s3a_cleanup_path), hadoop_conf
-        )
-        hp = spark._jvm.org.apache.hadoop.fs.Path(s3a_cleanup_path)
-        if fs.exists(hp):
-            fs.delete(hp, True)
-
-    print("\n[14/15] Creating EMPTY 'spark_writable_oss' with oss:// LOCATION...")
-    spark.sql("DROP TABLE IF EXISTS sample_db.spark_writable_oss")
-    spark.sql(f"""
-        CREATE EXTERNAL TABLE sample_db.spark_writable_oss (
-            id INT,
-            name STRING,
-            score DOUBLE
-        )
-        STORED AS PARQUET
-        LOCATION '{oss_path}'
-    """)
-    print("✓ Created empty 'spark_writable_oss' (oss:// → s3:// rewrite target)")
-    print(f"   Location: {oss_path}")
-
-    print("\n[15/15] Creating EMPTY 'spark_writable_cos' with cos:// LOCATION...")
-    spark.sql("DROP TABLE IF EXISTS sample_db.spark_writable_cos")
-    spark.sql(f"""
-        CREATE EXTERNAL TABLE sample_db.spark_writable_cos (
-            id INT,
-            name STRING,
-            score DOUBLE
-        )
-        STORED AS PARQUET
-        LOCATION '{cos_path}'
-    """)
-    print("✓ Created empty 'spark_writable_cos' (cos:// → s3:// rewrite target)")
-    print(f"   Location: {cos_path}")
+    # NOTE: The oss:// and cos:// rewrite tests (test/sql/s3/insert_oss_cos_rewrite.test)
+    # create their own tables inside the test rather than seeding here. Spark's bundled
+    # Hadoop runtime does not include the hadoop-aliyun (oss) or hadoop-cos jars, so a
+    # `CREATE EXTERNAL TABLE LOCATION 'oss://...'` triggers a FileSystem.get(oss://) lookup
+    # that fails with ClassNotFoundException. DuckDB's HMS extension stores LOCATION
+    # verbatim with no scheme validation, so the test can register the tables itself.
 
     # Display summary
     print("\n" + "=" * 80)
@@ -699,8 +647,6 @@ def main():
     print("│ multi_partition          │ Parquet│ 60        │ Partitioned by year, month, region  │")
     print("│ spark_writable_parquet   │ Parquet│ 0 (empty) │ DuckDB INSERT write-path target     │")
     print("│ cross_engine_parquet     │ Parquet│ 10        │ Spark-seeded; DuckDB appends 5 more │")
-    print("│ spark_writable_oss       │ Parquet│ 0 (empty) │ oss:// → s3:// rewrite target       │")
-    print("│ spark_writable_cos       │ Parquet│ 0 (empty) │ cos:// → s3:// rewrite target       │")
     print("└──────────────────────────┴────────┴───────────┴─────────────────────────────────────┘")
     print()
     print("Type Testing Coverage:")
