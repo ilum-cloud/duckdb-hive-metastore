@@ -86,6 +86,23 @@ The following table shows which SQL operations are supported for each table form
 - DATE/TIMESTAMP columns are stored in HMS as `date`/`timestamp` and round-trip
   correctly because `duckdb-avro` reads the corresponding Avro logical types.
 
+**Schema drift on Parquet (not supported):**
+
+- Columns added directly to HMS metadata (e.g. `ALTER TABLE ADD COLUMNS` in
+  Hive/Spark, or direct mutation of `COLUMNS_V2`) are **not** visible to DuckDB
+  on Parquet-backed tables. The Parquet file schema is treated as authoritative
+  for the column list — `HMSTableEntry::DiscoverDynamicSchema` reads the schema
+  from the data files and overrides the HMS column list at catalog load time.
+- Affects pure metadata schema evolution flows where Hive/Spark adds a column
+  but the underlying Parquet files have not been rewritten yet. Old rows would
+  return `NULL` for the new column in a fully HMS-driven catalog — this
+  extension does not surface the column at all.
+- Workaround: rewrite the data files with the new column projected (e.g.
+  `INSERT OVERWRITE` from Spark) so the Parquet footer carries the new column.
+  Once present in the files, DuckDB sees it.
+- Tracking: see the schema-drift issue on GitHub. The acceptance test
+  `test/sql/oss/schema_drift.test` is currently disabled.
+
 ### Write Operation Requirements
 
 For INSERT operations on Delta Lake tables:

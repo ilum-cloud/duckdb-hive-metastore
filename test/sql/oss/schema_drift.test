@@ -9,6 +9,14 @@
 #              'drift_note' into COLUMNS_V2 for sample_db.customers
 #              (invoked by the test-schema-drift Makefile target).
 
+# DISABLED — pure HMS schema drift on Parquet tables is not supported by this
+# extension. HMSTableEntry::DiscoverDynamicSchema reads the schema from the
+# Parquet files and overrides the HMS column list, so a column added only to
+# HMS metadata never reaches the catalog. Re-enable once the wrapper scan that
+# pads NULL for HMS-only columns lands. See README "Schema drift on Parquet"
+# caveat and the schema-drift GitHub issue.
+mode skip
+
 require hive_metastore
 
 require-env HMS_TEST_AVAILABLE

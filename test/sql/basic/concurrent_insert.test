@@ -26,13 +26,10 @@ CREATE TABLE hms.sample_db.duck_concurrent_writes (
     tag VARCHAR
 ) WITH (format='parquet', location='s3a://test-bucket/duck_concurrent_writes/');
 
-statement ok
-DETACH hms;
-
-# Each concurrentloop iteration runs in its own fresh connection and does NOT inherit
-# the main session's secrets or catalogs. The S3 secret and HMS ATTACH must therefore
-# be created inside the loop body so each worker session can authenticate to MinIO and
-# resolve the HMS catalog before issuing its INSERT.
+# Concurrentloop workers share the main session's DatabaseInstance, so the `s3`
+# secret and the `hms` attached catalog created above are visible to every worker
+# connection. No per-worker ATTACH or CREATE SECRET is needed; each worker only
+# issues its INSERT, which is what we actually want to stress.
 #
 # UUID collision avoidance: PhysicalCopyToFile generates a UUID-suffixed filename per
 # INSERT statement and runs with parallel=false. Two concurrent INSERTs therefore write
@@ -44,21 +41,10 @@ DETACH hms;
 concurrentloop i 0 8
 
 statement ok
-CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
-
-statement ok
-ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
-
-statement ok
 INSERT INTO hms.sample_db.duck_concurrent_writes
 SELECT j AS i, 'tag_' || ${i}::VARCHAR AS tag FROM range(100) t(j);
 
 endloop
-
-# Re-attach in the main session for verification. All worker sessions have committed
-# their INSERTs by the time endloop returns.
-statement ok
-ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
 # 8 sessions × 100 rows each = 800 total rows.
 query I

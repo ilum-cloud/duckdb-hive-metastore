@@ -29,6 +29,8 @@ public:
 
 	void AlterTable(ClientContext &context, AlterTableInfo &info);
 
+	void DropEntry(ClientContext &context, DropInfo &info) override;
+
 protected:
 	void LoadEntries(ClientContext &context) override;
 

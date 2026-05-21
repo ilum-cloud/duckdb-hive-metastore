@@ -24,17 +24,18 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
-# Force CTAS to fail during execution (divide-by-zero happens after HMS CreateTable
-# already ran at plan time, so the metastore entry is created before the error).
+# Force CTAS to fail during execution. error() throws at scan time, after HMS
+# CreateTable has already run at plan time, so the metastore entry is created
+# before the error fires.
 statement error
 CREATE TABLE hms.sample_db.duck_orphan_div0
 WITH (location='s3a://test-bucket/duck_orphan_div0')
 AS
-SELECT customer_id, 1/0 AS bad FROM hms.sample_db.customers LIMIT 5;
+SELECT customer_id, error('forced CTAS failure') AS bad FROM hms.sample_db.customers LIMIT 5;
 ----
 
 # REGRESSION-LOCK: PlanCreateTableAs registers the table in HMS before the SELECT
-# executes. The divide-by-zero above aborts the write, but the empty table entry
+# executes. The forced error() above aborts the write, but the empty table entry
 # remains. When PlanCreateTableAs is fixed to roll back on write failure this query
 # will return 0 — flip the expected value and remove this comment.
 query I
@@ -60,7 +61,7 @@ statement error
 CREATE TABLE hms.sample_db.duck_orphan_persist
 WITH (location='s3a://test-bucket/duck_orphan_persist')
 AS
-SELECT customer_id, 1/0 AS bad FROM hms.sample_db.customers LIMIT 5;
+SELECT customer_id, error('forced CTAS failure') AS bad FROM hms.sample_db.customers LIMIT 5;
 ----
 
 # REGRESSION-LOCK: same as above — orphan exists before re-attach.

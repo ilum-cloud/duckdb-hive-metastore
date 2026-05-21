@@ -42,13 +42,36 @@ EXPECTED = [
     ("duck_complex_parquet", 3, ["id", "tags", "info"]),
 ]
 
-# WHY: bidirectional appends exactly two rows to duck_inserted_parquet, chosen
-# because it has the simplest schema (id INT, name VARCHAR, score DOUBLE) and a
-# known baseline of 10. After append, count must be 12.
-BIDIRECTIONAL_TABLE = "duck_inserted_parquet"
-BIDIRECTIONAL_BASELINE_ROWS = 10
-BIDIRECTIONAL_APPEND_ROWS = 2
-BIDIRECTIONAL_EXPECTED_TOTAL = BIDIRECTIONAL_BASELINE_ROWS + BIDIRECTIONAL_APPEND_ROWS
+# WHY: bidirectional appends rows to a DuckDB-created table from Spark and
+# re-verifies count from the Spark side. One Parquet target + one CSV target so
+# both write paths are exercised. Each entry: (table_name, baseline_rows,
+# insert_sql_values). The expected post-append count is baseline + number of
+# rows in insert_sql_values.
+BIDIRECTIONAL_TARGETS = [
+    (
+        "duck_inserted_parquet",
+        10,
+        "(99, 'spark_added_1', 9.9), (100, 'spark_added_2', 10.10)",
+    ),
+    # duck_inserted_csv schema: id INT, label VARCHAR (see test/sql/csv/insert_csv.test).
+    # CSV append from Spark exercises LazySimpleSerDe (','-delim, no header), which is the
+    # serde DuckDB's HMS CREATE TABLE registers for CSV tables.
+    (
+        "duck_inserted_csv",
+        3,
+        "(101, 'spark_csv_1'), (102, 'spark_csv_2')",
+    ),
+]
+
+# Tables created by test/spark_verify/insert_scenarios.sql. Verified by Spark when
+# the scenarios script ran before the verifier (CI Tier 4 / make test-cross-engine-scenarios).
+# Skipped silently when absent so the verifier remains usable after a plain test-all run.
+SCENARIO_EXPECTED = [
+    ("xverify_parquet_ins", 3, ["id", "name"]),
+    ("xverify_parquet_ctas", 5, ["customer_id", "first_name"]),
+    ("xverify_csv_ins", 2, ["id", "label"]),
+    ("xverify_csv_ctas", 4, ["customer_id", "first_name"]),
+]
 
 
 def make_session():
@@ -110,39 +133,84 @@ def run_read_verification(spark):
 
 def run_bidirectional_append(spark):
     """
-    Manual mode extension: Spark INSERTs two rows into a DuckDB-created table
-    and we re-read to confirm both engines see the combined result.
+    Spark INSERTs additional rows into DuckDB-created tables (Parquet + CSV) and
+    re-reads to confirm both engines see the combined result.
 
     WHY: the read-only verification proves Spark can READ DuckDB's output. This
-    adds proof that Spark can WRITE into the same HMS-managed location and that
-    the row total reflects both writers. DuckDB will pick up the new files on
-    its next attach since the table location is shared.
+    adds proof that Spark can WRITE into the same HMS-managed location for both
+    Parquet and CSV write paths, and that the row total reflects both writers.
+    DuckDB will pick up the new files on its next attach since the table
+    location is shared.
     """
     failures = []
-    table = f"sample_db.{BIDIRECTIONAL_TABLE}"
 
-    try:
-        spark.sql(f"INSERT INTO {table} VALUES (99, 'spark_added_1', 9.9), (100, 'spark_added_2', 10.10)")
-    except Exception as exc:
-        failures.append(f"bidirectional: Spark INSERT into {table} failed — {exc}")
-        return failures
+    for table_short, baseline, values_sql in BIDIRECTIONAL_TARGETS:
+        table = f"sample_db.{table_short}"
+        append_rows = values_sql.count("(")
+        expected_total = baseline + append_rows
 
-    try:
-        post_count = spark.sql(f"SELECT COUNT(*) AS c FROM {table}").collect()[0].c
-    except Exception as exc:
-        failures.append(f"bidirectional: post-INSERT count query failed — {exc}")
-        return failures
+        try:
+            spark.sql(f"INSERT INTO {table} VALUES {values_sql}")
+        except Exception as exc:
+            failures.append(f"bidirectional[{table_short}]: Spark INSERT failed — {exc}")
+            continue
 
-    if post_count != BIDIRECTIONAL_EXPECTED_TOTAL:
-        failures.append(
-            f"bidirectional: expected {BIDIRECTIONAL_EXPECTED_TOTAL} rows after Spark append, " f"got {post_count}"
+        try:
+            post_count = spark.sql(f"SELECT COUNT(*) AS c FROM {table}").collect()[0].c
+        except Exception as exc:
+            failures.append(f"bidirectional[{table_short}]: post-INSERT count query failed — {exc}")
+            continue
+
+        if post_count != expected_total:
+            failures.append(
+                f"bidirectional[{table_short}]: expected {expected_total} rows after Spark append, got {post_count}"
+            )
+            continue
+
+        print(
+            f"✓ bidirectional[{table_short}]: Spark appended {append_rows} rows; "
+            f"total now {post_count} (== {expected_total})"
         )
+
+    return failures
+
+
+def run_scenario_verification(spark):
+    """
+    Verify tables created by test/spark_verify/insert_scenarios.sql when present.
+    Silently skips when none of the xverify_* tables exist (i.e. the scenarios
+    script was not run before the verifier).
+    """
+    failures = []
+    existing_tables = {row.tableName for row in spark.sql("SHOW TABLES IN sample_db").collect()}
+
+    any_present = any(t in existing_tables for t, _, _ in SCENARIO_EXPECTED)
+    if not any_present:
         return failures
 
-    print(
-        f"✓ bidirectional: Spark appended {BIDIRECTIONAL_APPEND_ROWS} rows to {table}; "
-        f"total now {post_count} (== {BIDIRECTIONAL_EXPECTED_TOTAL})"
-    )
+    print("\n--- scenarios (insert_scenarios.sql) ---")
+    for table, expected_count, expected_cols in SCENARIO_EXPECTED:
+        if table not in existing_tables:
+            failures.append(f"scenario[{table}]: NOT FOUND in sample_db (insert_scenarios.sql must run first)")
+            continue
+
+        try:
+            df = spark.sql(f"SELECT * FROM sample_db.{table}")
+            actual_count = df.count()
+            actual_cols = df.columns
+
+            if actual_count != expected_count:
+                failures.append(f"scenario[{table}]: expected {expected_count} rows, got {actual_count}")
+                continue
+            if actual_cols != expected_cols:
+                failures.append(f"scenario[{table}]: expected columns {expected_cols}, got {actual_cols}")
+                continue
+
+            print(f"✓ scenario[{table}]: {actual_count} rows, columns {actual_cols}")
+            df.show(3, truncate=False)
+        except Exception as exc:
+            failures.append(f"scenario[{table}]: query failed — {exc}")
+
     return failures
 
 
@@ -163,6 +231,7 @@ def main():
     spark.sparkContext.setLogLevel("ERROR")
 
     failures = run_read_verification(spark)
+    failures.extend(run_scenario_verification(spark))
 
     if args.mode == "bidirectional":
         # WHY: only run the append after read verification succeeds at least

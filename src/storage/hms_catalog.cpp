@@ -21,6 +21,7 @@
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "hms_constants.hpp"
@@ -118,23 +119,49 @@ ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	if (!base.sort_keys.empty()) {
 		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a hive_metastore catalog");
 	}
-	// Accept the WITH clause and copy its constant-string values into `tags`, which the
-	// downstream HMSTableSet::CreateTable reads to drive format/location selection. Non-constant
-	// or non-string option values are rejected — we don't bind expressions here.
+	// Accept the WITH clause and copy its constant values (stringified) into `tags`, which the
+	// downstream HMSTableSet::CreateTable reads to drive format/location selection. Booleans like
+	// `external_table=true` parse as CAST('t' AS BOOLEAN), so a CastExpression over a constant
+	// is folded here. Non-constant expressions (e.g. function calls) are rejected — we don't
+	// bind expressions on the CREATE path.
 	for (auto &opt : base.options) {
 		if (!opt.second) {
 			continue;
 		}
-		if (opt.second->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+		Value val;
+		auto *expr = opt.second.get();
+		if (expr->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+			val = expr->Cast<ConstantExpression>().value;
+		} else if (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+			auto &cast_expr = expr->Cast<CastExpression>();
+			if (!cast_expr.child || cast_expr.child->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+				return ErrorData(
+				    ExceptionType::BINDER,
+				    StringUtil::Format("CREATE TABLE option '%s' must be a constant string literal", opt.first));
+			}
+			auto &inner = cast_expr.child->Cast<ConstantExpression>();
+			// Try to fold the cast (covers numeric → numeric, etc). When the default cast
+			// path lacks an implementation — notably VARCHAR → BOOLEAN for `true`/`false`,
+			// which the postgres grammar emits as CAST('t'/'f' AS BOOLEAN) — fall back to
+			// the inner string value. The stored tag is the raw constant ("t"/"f") rather
+			// than the post-cast form ("true"/"false"); HMS treats tags as opaque strings
+			// so the round-trip is preserved.
+			Value casted;
+			string cast_err;
+			if (inner.value.DefaultTryCastAs(cast_expr.cast_type, casted, &cast_err)) {
+				val = std::move(casted);
+			} else {
+				val = inner.value;
+			}
+		} else {
 			return ErrorData(
 			    ExceptionType::BINDER,
 			    StringUtil::Format("CREATE TABLE option '%s' must be a constant string literal", opt.first));
 		}
-		auto &const_expr = opt.second->Cast<ConstantExpression>();
-		if (const_expr.value.IsNull()) {
+		if (val.IsNull()) {
 			continue;
 		}
-		base.tags[opt.first] = const_expr.value.ToString();
+		base.tags[opt.first] = val.ToString();
 	}
 	base.options.clear();
 	return ErrorData();
