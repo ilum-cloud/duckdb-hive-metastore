@@ -25,7 +25,19 @@ constexpr SchemeRewrite S3_COMPATIBLE_SCHEMES[] = {
     {url::COSN, url::S3},
     {url::COS, url::S3},
 };
+
+// HMS's bundled Hadoop classpath registers a FileSystem for s3a only.
+// oss/cos/cosn need extra jars (hadoop-aliyun, hadoop-cos); the bare s3
+// scheme is unregistered in modern Hadoop. Rewrite all of these to s3a
+// so HMS accepts the LOCATION during CREATE_TABLE. Leave s3a unchanged.
+constexpr SchemeRewrite HMS_COMPATIBLE_SCHEMES[] = {
+    {url::OSS, url::S3A},
+    {url::COSN, url::S3A},
+    {url::COS, url::S3A},
+    {url::S3, url::S3A},
+};
 } // namespace
+
 
 string PathUtils::StripPlaceholder(const string &path) {
 	// Check for "-__PLACEHOLDER__" suffix
@@ -40,6 +52,15 @@ string PathUtils::StripPlaceholder(const string &path) {
 
 string PathUtils::RewriteS3CompatibleScheme(const string &path) {
 	for (const auto &rule : S3_COMPATIBLE_SCHEMES) {
+		if (StringUtil::StartsWith(path, rule.from)) {
+			return string(rule.to) + path.substr(std::strlen(rule.from));
+		}
+	}
+	return path;
+}
+
+string PathUtils::RewriteToHMSCompatibleScheme(const string &path) {
+	for (const auto &rule : HMS_COMPATIBLE_SCHEMES) {
 		if (StringUtil::StartsWith(path, rule.from)) {
 			return string(rule.to) + path.substr(std::strlen(rule.from));
 		}

@@ -45,24 +45,24 @@ SELECT id, attrs FROM hms.sample_db.duck_xtypes_map ORDER BY id;
 
 # --- Nested STRUCT (STRUCT containing STRUCT) ---
 # Both the outer and inner STRUCT hit the same LogicalTypeToHiveType branch
-# recursively → wrapper column gets Hive type struct<inner:struct<a:int,b:varchar>,tag:string>.
+# recursively → wrapper column gets Hive type struct<inr:struct<a:int,b:varchar>,tag:string>.
 statement ok
 CREATE TABLE hms.sample_db.duck_xtypes_nested_struct (
     id INTEGER,
-    wrapper STRUCT(inner STRUCT(a INTEGER, b VARCHAR), tag VARCHAR)
+    wrapper STRUCT(inr STRUCT(a INTEGER, b VARCHAR), tag VARCHAR)
 ) WITH (format='parquet', location='s3a://test-bucket/duck_xtypes_nested_struct');
 
 statement ok
 INSERT INTO hms.sample_db.duck_xtypes_nested_struct VALUES
-    (1, {'inner': {'a': 10, 'b': 'hello'}, 'tag': 'first'}),
-    (2, {'inner': {'a': 20, 'b': NULL}, 'tag': NULL}),
+    (1, {'inr': {'a': 10, 'b': 'hello'}, 'tag': 'first'}),
+    (2, {'inr': {'a': 20, 'b': NULL}, 'tag': NULL}),
     (3, NULL);
 
 query IT
 SELECT id, wrapper FROM hms.sample_db.duck_xtypes_nested_struct ORDER BY id;
 ----
-1	{'inner': {'a': 10, 'b': hello}, 'tag': first}
-2	{'inner': {'a': 20, 'b': NULL}, 'tag': NULL}
+1	{'inr': {'a': 10, 'b': hello}, 'tag': first}
+2	{'inr': {'a': 20, 'b': NULL}, 'tag': NULL}
 3	NULL
 
 # --- LIST of STRUCT ---
@@ -142,8 +142,8 @@ SELECT id, attrs FROM hms.sample_db.duck_xtypes_map ORDER BY id;
 query IT
 SELECT id, wrapper FROM hms.sample_db.duck_xtypes_nested_struct ORDER BY id;
 ----
-1	{'inner': {'a': 10, 'b': hello}, 'tag': first}
-2	{'inner': {'a': 20, 'b': NULL}, 'tag': NULL}
+1	{'inr': {'a': 10, 'b': hello}, 'tag': first}
+2	{'inr': {'a': 20, 'b': NULL}, 'tag': NULL}
 3	NULL
 
 query IT

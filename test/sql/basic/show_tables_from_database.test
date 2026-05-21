@@ -29,6 +29,7 @@ SELECT table_name FROM information_schema.tables
 WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name NOT LIKE 'duck\_%' ESCAPE '\'
 ORDER BY table_name;
 ----
+cross_engine_parquet
 customers
 decimal_partitioned
 inventory
@@ -37,4 +38,5 @@ orders
 products
 reviews
 shipments
+spark_writable_parquet
 type_test

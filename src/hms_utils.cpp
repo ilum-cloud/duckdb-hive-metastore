@@ -14,6 +14,7 @@
 
 #include "hms_utils.hpp"
 #include "hms_constants.hpp"
+#include "hms_path_utils.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "storage/hms_schema_entry.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
@@ -582,7 +583,15 @@ Apache::Hadoop::Hive::Table HMSUtils::BuildThriftTable(ClientContext &context, H
 	// Determine storage location: explicit table parameter 'location' or warehouse default
 	auto loc_it = table.parameters.find("location");
 	if (loc_it != table.parameters.end() && !loc_it->second.empty()) {
-		sd.location = loc_it->second;
+		// Rewrite cloud schemes that HMS's bundled Hadoop classpath cannot resolve
+		// (oss://, cos://, cosn://, s3://) to s3a:// before sending to the metastore.
+		// HMS calls FileSystem.get(uri) during CREATE_TABLE and throws
+		// UnsupportedFileSystemException for schemes lacking a registered FS impl.
+		// s3a is the scheme Hadoop ships a FileSystem for; the I/O layer rewrites
+		// s3a back to s3 for httpfs via RewriteS3CompatibleScheme at scan time.
+		// The S3-compatible bucket and key are preserved; only the scheme changes.
+		sd.location = hms::PathUtils::RewriteToHMSCompatibleScheme(loc_it->second);
+		table.parameters["location"] = sd.location;
 	} else if (!warehouse_location.empty()) {
 		// Build a default managed location under the warehouse: <warehouse>/<db>/<table>
 		string default_loc = warehouse_location;

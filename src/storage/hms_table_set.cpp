@@ -5,6 +5,7 @@
 #include "storage/hms_table_set.hpp"
 #include "storage/hms_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
@@ -259,6 +260,19 @@ optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, Boun
 	auto ptr = table_entry.get();
 	CreateEntry(std::move(table_entry));
 	return ptr;
+}
+
+void HMSTableSet::DropEntry(ClientContext &context, DropInfo &info) {
+	auto &hms_catalog = catalog.Cast<HMSCatalog>();
+	try {
+		HMSAPI::DropTable(context, schema.name, info.name, hms_catalog.endpoint);
+	} catch (const std::exception &ex) {
+		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return;
+		}
+		throw;
+	}
+	EraseEntryInternal(info.name);
 }
 
 void HMSTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {

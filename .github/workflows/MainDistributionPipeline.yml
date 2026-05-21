@@ -60,6 +60,14 @@ jobs:
   # This duplicates the build + env-up sequence with the `test` job (~2x CI minutes),
   # but the tradeoff is intentional: independent failure surfaces and parallel
   # execution (faster wall-clock) outweigh the duplicated work.
+  #
+  # The `test-spark-verify` Makefile target covers three things end to end:
+  #   1. DuckDB sqllogictest suite populates the `duck_*` tables.
+  #   2. test/spark_verify/insert_scenarios.sql populates the `xverify_*` tables.
+  #   3. spark_verify_writes.py runs in `bidirectional` mode — Spark reads every
+  #      DuckDB-written table AND appends rows into one Parquet and one CSV
+  #      target, re-verifying counts. This exercises the Spark write path on
+  #      every CI run, not just manual debugging.
   spark-verify:
     name: Spark Cross-Engine Verify
     runs-on: ubuntu-latest
