@@ -5,12 +5,12 @@
 -- The full sqllogictest suite (test/sql/**) is the source of truth for CI; this
 -- file is a hand-runnable reference for ad-hoc cross-engine debugging.
 --
--- Run manually with:
---   ./build/release/duckdb -unsigned \
---       -c "LOAD '.../hive_metastore.duckdb_extension';" \
---       -init test/spark_verify/insert_scenarios.sql
+-- Invoked by `make test-cross-engine-scenarios-run` (which is itself called by
+-- `make test-spark-verify` as Tier 4 of the cross-engine job in CI). Each xverify_*
+-- table here is checked by test/spark_verify_writes.py SCENARIO_EXPECTED.
 --
--- Not invoked by CI.
+-- Run manually against an already-running env with:
+--   make test-cross-engine-scenarios-run
 
 CREATE OR REPLACE SECRET s3 (
     TYPE S3, PROVIDER config,

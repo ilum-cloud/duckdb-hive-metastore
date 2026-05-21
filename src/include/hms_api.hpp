@@ -38,6 +38,9 @@ public:
 	// Create a table in HMS
 	static void CreateTable(ClientContext &ctx, const Apache::Hadoop::Hive::Table &table, const string &endpoint);
 
+	// Drop a table from HMS (metadata only; storage files are not removed).
+	static void DropTable(ClientContext &ctx, const string &db_name, const string &table_name, const string &endpoint);
+
 	// Helper to get or create a client based on endpoint
 	static unique_ptr<HMSClient> GetClient(const string &endpoint);
 };

@@ -54,6 +54,14 @@ public:
 	// Returns the path unchanged when no rule matches.
 	static string RewriteS3CompatibleScheme(const string &path);
 
+	// Rewrite S3-API-compatible scheme prefixes that HMS's bundled Hadoop classpath
+	// does not register a FileSystem for (oss, cos, cosn, s3) to s3a://. Used at
+	// CREATE_TABLE time so the metastore accepts the location. s3a is the scheme
+	// Hadoop ships a FileSystem impl for; oss/cos/cosn would require extra jars
+	// (hadoop-aliyun, hadoop-cos) that the ilum/hive container does not include,
+	// and the bare s3 scheme is unregistered in modern Hadoop releases.
+	static string RewriteToHMSCompatibleScheme(const string &path);
+
 	// Ensure proper trailing slash for Delta tables
 	static string EnsureTrailingSlash(const string &path);
 

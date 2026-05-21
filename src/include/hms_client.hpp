@@ -32,6 +32,9 @@ public:
 	vector<Apache::Hadoop::Hive::Table> GetTableObjects(const string &db_name, const vector<string> &table_names);
 	// Create a table in the metastore using a Thrift Table object
 	void CreateTable(const Apache::Hadoop::Hive::Table &table);
+	// Drop a table from the metastore. delete_data=false preserves the underlying
+	// storage files (we treat HMS as a pure catalog and do not own the bucket layout).
+	void DropTable(const string &db_name, const string &table_name, bool delete_data);
 
 private:
 	string host;

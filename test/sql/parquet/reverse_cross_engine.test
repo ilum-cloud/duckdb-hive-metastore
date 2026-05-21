@@ -53,7 +53,7 @@ SELECT COUNT(*) FROM hms.sample_db.cross_engine_parquet WHERE name LIKE 'duck_ro
 5
 
 # Spot-check a known DuckDB row to confirm values survive the round-trip.
-query ITD
+query ITR
 SELECT id, name, score FROM hms.sample_db.cross_engine_parquet WHERE id = 11;
 ----
 11	duck_row_11	16.5

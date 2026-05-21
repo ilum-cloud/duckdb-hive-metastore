@@ -579,6 +579,21 @@ def main():
         fs.delete(hadoop_path, True)
 
     spark.sql("DROP TABLE IF EXISTS sample_db.spark_writable_parquet")
+
+    # Write a zero-row Parquet file at the location so HMS scans of the empty table
+    # succeed before DuckDB writes its first data file. DuckDB's parquet reader errors
+    # on a glob that matches no files; a single 0-row file with the table schema
+    # provides a valid (but empty) scan target.
+    writable_schema = StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("name", StringType(), True),
+            StructField("score", DoubleType(), True),
+        ]
+    )
+    empty_df = spark.createDataFrame([], writable_schema)
+    empty_df.coalesce(1).write.mode("overwrite").parquet(writable_path)
+
     spark.sql(f"""
         CREATE EXTERNAL TABLE sample_db.spark_writable_parquet (
             id INT,
