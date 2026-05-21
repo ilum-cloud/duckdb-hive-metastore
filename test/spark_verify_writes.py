@@ -43,15 +43,18 @@ EXPECTED = [
 ]
 
 # WHY: bidirectional appends rows to a DuckDB-created table from Spark and
-# re-verifies count from the Spark side. One Parquet target + one CSV target so
-# both write paths are exercised. Each entry: (table_name, baseline_rows,
-# insert_sql_values). The expected post-append count is baseline + number of
-# rows in insert_sql_values.
+# re-verifies count from the Spark side. One Parquet target, one CSV target, and
+# one Avro target so all three write paths are exercised. Each entry:
+# (table_name, baseline_rows, rows) — `rows` is a list of `VALUES`-row literals.
+# Expected post-append count = baseline + len(rows).
 BIDIRECTIONAL_TARGETS = [
     (
         "duck_inserted_parquet",
         10,
-        "(99, 'spark_added_1', 9.9), (100, 'spark_added_2', 10.10)",
+        [
+            "(99, 'spark_added_1', 9.9)",
+            "(100, 'spark_added_2', 10.10)",
+        ],
     ),
     # duck_inserted_csv schema: id INT, label VARCHAR (see test/sql/csv/insert_csv.test).
     # CSV append from Spark exercises LazySimpleSerDe (','-delim, no header), which is the
@@ -59,7 +62,24 @@ BIDIRECTIONAL_TARGETS = [
     (
         "duck_inserted_csv",
         3,
-        "(101, 'spark_csv_1'), (102, 'spark_csv_2')",
+        [
+            "(101, 'spark_csv_1')",
+            "(102, 'spark_csv_2')",
+        ],
+    ),
+    # duck_created_avro_simple schema: id BIGINT, label VARCHAR (see
+    # test/sql/avro/create_avro_table.test). DuckDB creates only the HMS entry —
+    # duckdb-avro is read-only — so the baseline is 0 and the file is written by
+    # Spark here. The post-Spark DuckDB read pass (Tier 8 of test-spark-verify)
+    # asserts the rows are visible to DuckDB via duckdb-avro.
+    # CAST forces BIGINT for the id column even though the literal is an INT.
+    (
+        "duck_created_avro_simple",
+        0,
+        [
+            "(CAST(1 AS BIGINT), 'spark_avro_1')",
+            "(CAST(2 AS BIGINT), 'spark_avro_2')",
+        ],
     ),
 ]
 
@@ -144,10 +164,11 @@ def run_bidirectional_append(spark):
     """
     failures = []
 
-    for table_short, baseline, values_sql in BIDIRECTIONAL_TARGETS:
+    for table_short, baseline, rows in BIDIRECTIONAL_TARGETS:
         table = f"sample_db.{table_short}"
-        append_rows = values_sql.count("(")
+        append_rows = len(rows)
         expected_total = baseline + append_rows
+        values_sql = ", ".join(rows)
 
         try:
             spark.sql(f"INSERT INTO {table} VALUES {values_sql}")
