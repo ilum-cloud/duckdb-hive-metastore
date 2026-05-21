@@ -89,28 +89,32 @@ test-spark-verify: release
 	@echo "Running Spark Cross-Engine Verification"
 	@echo "========================================"
 	@echo ""
-	@echo "[1/7] Cleaning up any old containers..."
+	@echo "[1/8] Cleaning up any old containers..."
 	cd test && docker compose down -v --remove-orphans 2>/dev/null || true
 	@echo ""
-	@echo "[2/7] Starting Hive Metastore test environment..."
+	@echo "[2/8] Starting Hive Metastore test environment..."
 	cd test && docker compose up -d
 	@echo ""
-	@echo "[3/7] Waiting for Hive Metastore to be ready and seeded..."
+	@echo "[3/8] Waiting for Hive Metastore to be ready and seeded..."
 	cd test && docker compose wait spark-seeder
 	@echo "✓ Hive Metastore is ready and seeded with data"
 	@echo ""
-	@echo "[4/7] Applying post-seed HMS mutations..."
+	@echo "[4/8] Applying post-seed HMS mutations..."
 	bash test/sql/oss/post_seed_oss_mutation.sh
 	bash test/sql/oss/post_seed_schema_drift.sh
 	@echo ""
-	@echo "[5/7] Running DuckDB tests (populates duck_* tables)..."
-	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
+	@echo "[5/8] Running DuckDB tests (populates duck_* tables, incl. Avro CREATE)..."
+	HMS_TEST_AVAILABLE=1 REMOTE_EXTENSIONS=1 ./build/release/test/unittest 'test*'
 	@echo ""
-	@echo "[6/7] Running insert_scenarios.sql (populates xverify_* tables)..."
+	@echo "[6/8] Running insert_scenarios.sql (populates xverify_* tables)..."
 	$(MAKE) test-cross-engine-scenarios-run
 	@echo ""
-	@echo "[7/7] Verifying via Spark (bidirectional mode: read + Spark INSERT)..."
+	@echo "[7/8] Verifying via Spark (bidirectional mode: read + Spark INSERT)..."
 	VERIFY_MODE=bidirectional bash test/spark_verify_writes.sh
+	@echo ""
+	@echo "[8/8] Post-Spark DuckDB read pass (Avro reverse cross-engine)..."
+	HMS_TEST_AVAILABLE=1 REMOTE_EXTENSIONS=1 CROSS_ENGINE_POST_SPARK=1 \
+	    ./build/release/test/unittest 'test/sql/avro/reverse_cross_engine_avro.test'
 	@echo ""
 	@echo "========================================"
 	@echo "Spark verification complete. Cleaning up..."
