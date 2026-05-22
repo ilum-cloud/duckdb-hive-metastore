@@ -25,6 +25,17 @@ constexpr SchemeRewrite S3_COMPATIBLE_SCHEMES[] = {
     {url::COSN, url::S3},
     {url::COS, url::S3},
 };
+
+// HMS's bundled Hadoop classpath registers a FileSystem for s3a only.
+// oss/cos/cosn need extra jars (hadoop-aliyun, hadoop-cos); the bare s3
+// scheme is unregistered in modern Hadoop. Rewrite all of these to s3a
+// so HMS accepts the LOCATION during CREATE_TABLE. Leave s3a unchanged.
+constexpr SchemeRewrite HMS_COMPATIBLE_SCHEMES[] = {
+    {url::OSS, url::S3A},
+    {url::COSN, url::S3A},
+    {url::COS, url::S3A},
+    {url::S3, url::S3A},
+};
 } // namespace
 
 string PathUtils::StripPlaceholder(const string &path) {
@@ -40,6 +51,15 @@ string PathUtils::StripPlaceholder(const string &path) {
 
 string PathUtils::RewriteS3CompatibleScheme(const string &path) {
 	for (const auto &rule : S3_COMPATIBLE_SCHEMES) {
+		if (StringUtil::StartsWith(path, rule.from)) {
+			return string(rule.to) + path.substr(std::strlen(rule.from));
+		}
+	}
+	return path;
+}
+
+string PathUtils::RewriteToHMSCompatibleScheme(const string &path) {
+	for (const auto &rule : HMS_COMPATIBLE_SCHEMES) {
 		if (StringUtil::StartsWith(path, rule.from)) {
 			return string(rule.to) + path.substr(std::strlen(rule.from));
 		}
@@ -157,8 +177,14 @@ string PathUtils::BuildGlobPattern(const string &path, const FormatDetectionResu
 		// For partitioned tables, use recursive glob
 		glob = is_partitioned ? "/**/*.parquet" : "/*.parquet";
 	} else if (format.IsAvro()) {
-		// For partitioned tables, use recursive glob
-		glob = is_partitioned ? "/**/*.avro" : "/*.avro";
+		// Hive's AvroContainerOutputFormat writes files with no extension
+		// (e.g. `000000_0`), while Spark's `format("avro")` writer uses `.avro`.
+		// Match any non-underscore-prefixed file so both naming conventions
+		// resolve. The `_` prefix exclusion drops Hive marker files (`_SUCCESS`,
+		// `_temporary`); as a side effect any user-named file starting with `_`
+		// is also skipped — matches the CSV branch below and the Hive
+		// convention of treating leading underscores as "hidden".
+		glob = is_partitioned ? "/**/[!_]*" : "/[!_]*";
 	} else {
 		// For CSV/Text, use * to match any file
 		// Exclude files starting with _ (like _SUCCESS)

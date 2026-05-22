@@ -1,0 +1,92 @@
+# name: test/sql/basic/with_options_stringification.test
+# description: Pins the WITH-option stringification contract in SupportsCreateTable:
+# group: [basic]
+
+#   BOOLEAN, DOUBLE, and NULL constants must be accepted (not rejected), and
+#   NULL values must be silently skipped rather than stored as tags.
+#   These are positive-path completions — the negative paths live in create_table_options.test.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# BOOLEAN constant: Value::ToString() produces "true"/"false", which must be accepted
+# by SupportsCreateTable and reach BuildThriftTable as a tag (not cause a type error).
+statement ok
+CREATE TABLE hms.sample_db.duck_optstr_bool (id INTEGER)
+WITH (location='s3a://test-bucket/duck_optstr_bool/', format='parquet', external_table=true);
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_bool';
+----
+1
+
+# DOUBLE constant: stringified to its decimal representation and accepted.
+# Verifies the branch takes the same ToString() path regardless of Value type.
+statement ok
+CREATE TABLE hms.sample_db.duck_optstr_double (id INTEGER)
+WITH (location='s3a://test-bucket/duck_optstr_double/', format='parquet', compression_level=1.5);
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_double';
+----
+1
+
+# NULL constant: SupportsCreateTable must silently skip it (IsNull() guard) and not
+# store an empty/null tag. Table creation must still succeed.
+statement ok
+CREATE TABLE hms.sample_db.duck_optstr_null (id INTEGER)
+WITH (location='s3a://test-bucket/duck_optstr_null/', format='parquet', optional_hint=NULL);
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_null';
+----
+1
+
+# Multiple non-format/non-location options coexisting: all must be stringified and
+# forwarded without any individual one blocking the others.
+statement ok
+CREATE TABLE hms.sample_db.duck_optstr_multi (id INTEGER)
+WITH (location='s3a://test-bucket/duck_optstr_multi/', format='parquet', flag_a=true, level=2.0, note=NULL);
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_multi';
+----
+1
+
+# Round-trip check: detach and re-attach to confirm HMS persisted the table metadata.
+# If the BOOLEAN/DOUBLE/NULL tags corrupted the Thrift payload, the table would not
+# survive a fresh attach and the SELECT would return 0.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_bool';
+----
+1
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_optstr_multi';
+----
+1

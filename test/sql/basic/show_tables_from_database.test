@@ -16,14 +16,20 @@ SELECT schema_name FROM information_schema.schemata WHERE catalog_name = 'hms';
 default
 sample_db
 
-# Show all tables in the HMS
+# Show all tables in the HMS. Filter out tables created by other tests
+# (prefixed with 'duck_') so this test is robust to test ordering.
 query T
-SHOW TABLES FROM hms.default;
+SELECT table_name FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='default' AND table_name NOT LIKE 'duck\_%' ESCAPE '\'
+ORDER BY table_name;
 ----
 
 query T
-SHOW TABLES FROM hms.sample_db;
+SELECT table_name FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name NOT LIKE 'duck\_%' ESCAPE '\'
+ORDER BY table_name;
 ----
+cross_engine_parquet
 customers
 decimal_partitioned
 inventory
@@ -32,4 +38,5 @@ orders
 products
 reviews
 shipments
+spark_writable_parquet
 type_test

@@ -31,11 +31,11 @@ The following table shows which SQL operations are supported for each table form
 | Feature             | Parquet | Delta Lake              | Iceberg                 | CSV/Text             | Avro | ORC |
 | ------------------- | ------- | ----------------------- | ----------------------- | -------------------- | ---- | --- |
 | **SELECT** (Read)   | ✅      | ✅                      | ✅¹                     | ✅                   | ✅²  | ⚠️³ |
-| **INSERT**          | ❌      | ⛔ Extension Limitation | ❌                      | ❌                   | ❌   | ❌  |
-| **UPDATE**          | ❌      | ⛔ Extension Limitation | ⛔ Extension Limitation | ❌                   | ❌   | ❌  |
-| **DELETE**          | ❌      | ⛔ Extension Limitation | ⛔ Extension Limitation | ❌                   | ❌   | ❌  |
-| **CREATE TABLE AS** | ❌      | ❌                      | ❌                      | ❌                   | ❌   | ❌  |
-| **CREATE TABLE**    | ✅      | ⛔ Extension Limitation | ❌                      | ✅                   | ❌   | ⚠️³ |
+| **INSERT**          | ✅⁴     | ⛔ Extension Limitation | ❌                      | ✅⁴                  | ❌   | ❌  |
+| **UPDATE**          | ⛔ Format Limitation | ⛔ Extension Limitation | ⛔ Extension Limitation | ⛔ Format Limitation | ⛔ Format Limitation | ⛔ Format Limitation |
+| **DELETE**          | ⛔ Format Limitation | ⛔ Extension Limitation | ⛔ Extension Limitation | ⛔ Format Limitation | ⛔ Format Limitation | ⛔ Format Limitation |
+| **CREATE TABLE AS** | ✅⁴     | ❌                      | ❌                      | ✅⁴                  | ❌   | ❌  |
+| **CREATE TABLE**    | ✅      | ⛔ Extension Limitation | ❌                      | ✅                   | ✅⁵  | ⚠️³ |
 | **COPY TO**         | ❌      | ❌                      | ❌                      | ❌                   | ❌   | ❌  |
 | **Partitioning**    | ✅      | ✅                      | ✅                      | ✅                   | ✅   | ⚠️³ |
 | **Complex Types**   | ✅      | ✅                      | ✅                      | ⛔ Format Limitation | ✅   | ⚠️³ |
@@ -57,14 +57,51 @@ The following table shows which SQL operations are supported for each table form
 
 **² Avro Tables:**
 
-- Automatic type mapping for DATE → INTEGER and TIMESTAMP → BIGINT
-- See [Working with Avro Tables](#working-with-avro-tables) for details and examples
+- DATE and TIMESTAMP columns are returned as proper SQL DATE/TIMESTAMP via
+  `duckdb-avro`'s logical-type support; no manual conversion needed.
+- See [Working with Avro Tables](#working-with-avro-tables) for details.
 
 **³ ORC Format:**
 
 - Only partial support in DuckDB
 - Some complex type combinations may not work correctly
 - Reading support varies depending on ORC file encoding and compression
+
+**⁴ INSERT / CTAS (Parquet, CSV):**
+
+- INSERT and CREATE TABLE AS are supported only for **non-partitioned** Parquet/CSV
+  tables. Each statement writes a single file named `data_<uuid>.<ext>` under the
+  table's `LOCATION`; concurrent inserts get different UUIDs and do not collide.
+- INSERT into a partitioned table is rejected with a clear error.
+- Writes go directly to the object store with no tmp-file/rename step — a crashed
+  writer can leave a partial file behind, matching Hive's native append semantics.
+- Use `INSERT … SELECT` for bulk loads (`COPY TO` against an HMS table is not
+  implemented and is redundant with the SELECT form).
+
+**⁵ Avro CREATE TABLE:**
+
+- Only the metastore entry is created — DuckDB's `read_avro` is read-only, so
+  INSERT into the resulting table will fail until the avro extension grows write
+  support. The table is interoperable with Spark/Hive writers immediately.
+- DATE/TIMESTAMP columns are stored in HMS as `date`/`timestamp` and round-trip
+  correctly because `duckdb-avro` reads the corresponding Avro logical types.
+
+**Schema drift on Parquet (not supported):**
+
+- Columns added directly to HMS metadata (e.g. `ALTER TABLE ADD COLUMNS` in
+  Hive/Spark, or direct mutation of `COLUMNS_V2`) are **not** visible to DuckDB
+  on Parquet-backed tables. The Parquet file schema is treated as authoritative
+  for the column list — `HMSTableEntry::DiscoverDynamicSchema` reads the schema
+  from the data files and overrides the HMS column list at catalog load time.
+- Affects pure metadata schema evolution flows where Hive/Spark adds a column
+  but the underlying Parquet files have not been rewritten yet. Old rows would
+  return `NULL` for the new column in a fully HMS-driven catalog — this
+  extension does not surface the column at all.
+- Workaround: rewrite the data files with the new column projected (e.g.
+  `INSERT OVERWRITE` from Spark) so the Parquet footer carries the new column.
+  Once present in the files, DuckDB sees it.
+- Tracking: see the schema-drift issue on GitHub. The acceptance test
+  `test/sql/oss/schema_drift.test` is currently disabled.
 
 ### Write Operation Requirements
 
@@ -201,7 +238,9 @@ SELECT * FROM hms.lakehouse.iceberg_table;
 
 ### Working with Avro Tables
 
-Avro tables are fully supported with automatic type mapping:
+Avro tables are fully readable. DuckDB's `avro` extension resolves Avro logical
+types (`date`, `timestamp-micros`, `decimal`) automatically, so DATE/TIMESTAMP
+columns come through with their proper SQL types.
 
 ```sql
 -- Install and load required extensions
@@ -212,27 +251,11 @@ LOAD hive_metastore;
 -- Attach HMS and query Avro tables
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
-SELECT * FROM hms.warehouse.shipments;
+SELECT * FROM hms.warehouse.shipments WHERE ship_date >= DATE '2024-01-01';
 ```
 
-**Automatic Type Mapping:**
-
-Due to Avro's limited type support ([see issue](https://github.com/duckdb/duckdb-avro/issues/6)), the HMS extension automatically converts:
-
-- `DATE` → `INTEGER` (days since Unix epoch 1970-01-01)
-- `TIMESTAMP` → `BIGINT` (microseconds since Unix epoch)
-- Complex types (STRUCT, LIST, MAP) are recursively mapped
-
-When filtering on date columns, use integer representation:
-
-```sql
--- Filter by date (19723 = 2024-01-01)
-SELECT * FROM hms.warehouse.shipments WHERE ship_date >= 19723;
-
--- Convert back to date if needed
-SELECT shipment_id, ship_date::DATE + INTERVAL '0' DAY AS actual_date
-FROM hms.warehouse.shipments;
-```
+`CREATE TABLE … WITH (format='avro', location='…')` is supported (metastore
+entry only — writes go through Spark/Hive until `duckdb-avro` gains a writer).
 
 ### CREATE TABLE Support
 
