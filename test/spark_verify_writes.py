@@ -196,17 +196,24 @@ def run_bidirectional_append(spark):
     return failures
 
 
-def run_scenario_verification(spark):
+def run_scenario_verification(spark, require_present=False):
     """
     Verify tables created by test/spark_verify/insert_scenarios.sql when present.
-    Silently skips when none of the xverify_* tables exist (i.e. the scenarios
-    script was not run before the verifier).
+    With require_present=False (default), silently skips when no xverify_* tables exist
+    (e.g. plain `spark-verify-writes` run after `make test-all`). With require_present=True,
+    the CI bidirectional mode treats "no xverify_* tables" as a regression: insert_scenarios.sql
+    is supposed to run immediately before the verifier in that pipeline.
     """
     failures = []
     existing_tables = {row.tableName for row in spark.sql("SHOW TABLES IN sample_db").collect()}
 
     any_present = any(t in existing_tables for t, _, _ in SCENARIO_EXPECTED)
     if not any_present:
+        if require_present:
+            failures.append(
+                "scenarios: none of the xverify_* tables exist. In bidirectional CI mode "
+                "insert_scenarios.sql must populate them before the verifier runs."
+            )
         return failures
 
     print("\n--- scenarios (insert_scenarios.sql) ---")
@@ -252,7 +259,9 @@ def main():
     spark.sparkContext.setLogLevel("ERROR")
 
     failures = run_read_verification(spark)
-    failures.extend(run_scenario_verification(spark))
+    # In bidirectional mode the upstream CI step runs insert_scenarios.sql immediately
+    # before this verifier, so missing xverify_* tables indicate a real regression.
+    failures.extend(run_scenario_verification(spark, require_present=(args.mode == "bidirectional")))
 
     if args.mode == "bidirectional":
         # WHY: only run the append after read verification succeeds at least

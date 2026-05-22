@@ -114,11 +114,11 @@ void HMSAPI::CreateTable(ClientContext &ctx, const Apache::Hadoop::Hive::Table &
 	client->CreateTable(table);
 }
 
-void HMSAPI::DropTable(ClientContext &ctx, const string &db_name, const string &table_name, const string &endpoint) {
+bool HMSAPI::DropTable(ClientContext &ctx, const string &db_name, const string &table_name, const string &endpoint) {
 	auto client = GetClient(endpoint);
 	// delete_data=false: HMS extension manages the catalog only, not the underlying
 	// storage. The user controls file lifecycle via their object store.
-	client->DropTable(db_name, table_name, /*delete_data=*/false);
+	return client->DropTable(db_name, table_name, /*delete_data=*/false);
 }
 
 } // namespace duckdb

@@ -59,6 +59,15 @@ PARTITIONED BY (p);
 ----
 PARTITIONED BY
 
+# Quoted mixed-case option keys must be normalized so the downstream
+# case-sensitive `tags.find("format")` lookup still matches.
+statement ok
+CREATE TABLE hms.sample_db.duck_create_mixedcase_opt (id INTEGER)
+WITH ("Format"='parquet', "Location"='s3a://test-bucket/mixedcase');
+
+statement ok
+DROP TABLE hms.sample_db.duck_create_mixedcase_opt;
+
 # Re-attach with WAREHOUSE_LOCATION and verify CREATE without LOCATION now works
 # (the warehouse-default path).
 statement ok

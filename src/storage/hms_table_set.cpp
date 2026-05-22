@@ -264,13 +264,14 @@ optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, Boun
 
 void HMSTableSet::DropEntry(ClientContext &context, DropInfo &info) {
 	auto &hms_catalog = catalog.Cast<HMSCatalog>();
-	try {
-		HMSAPI::DropTable(context, schema.name, info.name, hms_catalog.endpoint);
-	} catch (const std::exception &ex) {
-		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
-			return;
+	bool dropped = HMSAPI::DropTable(context, schema.name, info.name, hms_catalog.endpoint);
+	if (!dropped) {
+		// Table did not exist in HMS. Without IF EXISTS, surface the error. With IF EXISTS,
+		// fall through so any stale local cache entry (e.g. dropped by another process after
+		// LoadEntries cached it) is also pruned.
+		if (info.if_not_found != OnEntryNotFound::RETURN_NULL) {
+			throw CatalogException("Table '%s.%s' does not exist", schema.name, info.name);
 		}
-		throw;
 	}
 	EraseEntryInternal(info.name);
 }

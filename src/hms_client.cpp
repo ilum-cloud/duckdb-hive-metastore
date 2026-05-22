@@ -126,13 +126,16 @@ void HMSClient::CreateTable(const Apache::Hadoop::Hive::Table &table) {
 	}
 }
 
-void HMSClient::DropTable(const string &db_name, const string &table_name, bool delete_data) {
+bool HMSClient::DropTable(const string &db_name, const string &table_name, bool delete_data) {
 	if (!connected)
 		Open();
 	try {
 		client->drop_table(db_name, table_name, delete_data);
-	} catch (Apache::Hadoop::Hive::NoSuchObjectException &e) {
-		throw IOException("Table '%s.%s' does not exist: %s", db_name, table_name, e.message);
+		return true;
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		// Distinct return value lets the caller honor IF EXISTS without swallowing
+		// transport or auth errors that look the same from a generic catch.
+		return false;
 	} catch (apache::thrift::TException &tx) {
 		throw IOException("Failed to drop table '%s.%s': %s", db_name, table_name, tx.what());
 	}
