@@ -131,7 +131,7 @@ ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 		Value val;
 		auto *expr = opt.second.get();
 		if (expr->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
-			val = expr->Cast<ConstantExpression>().value;
+			val = expr->Cast<ConstantExpression>().GetValue();
 		} else if (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
 			auto &cast_expr = expr->Cast<CastExpression>();
 			if (!cast_expr.child || cast_expr.child->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
@@ -147,10 +147,10 @@ ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 			// treats tags as opaque strings so storing the raw value is still meaningful.
 			Value casted;
 			string cast_err;
-			if (inner.value.DefaultTryCastAs(cast_expr.cast_type, casted, &cast_err)) {
+			if (inner.GetValue().DefaultTryCastAs(cast_expr.cast_type, casted, &cast_err)) {
 				val = std::move(casted);
 			} else {
-				val = inner.value;
+				val = inner.GetValue();
 			}
 		} else {
 			return ErrorData(
@@ -269,7 +269,6 @@ static PhysicalOperator &PlanHMSWrite(ClientContext &context, PhysicalPlanGenera
 	cast_copy.overwrite_mode = CopyOverwriteMode::COPY_ERROR_ON_CONFLICT;
 	cast_copy.file_extension = function.extension;
 	cast_copy.per_thread_output = false;
-	cast_copy.rotate = false;
 	cast_copy.return_type = CopyFunctionReturnType::CHANGED_ROWS;
 	cast_copy.partition_output = false;
 	cast_copy.write_partition_columns = false;
