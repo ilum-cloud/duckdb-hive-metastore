@@ -457,6 +457,44 @@ LogicalType HMSUtils::TypeToLogicalType(ClientContext &context, const string &ty
 	throw NotImplementedException("Unsupported or unrecognized Hive type: '%s'", type_text.c_str());
 }
 
+// duckdb-avro on DuckDB 1.4 returns INT32 for Avro `date` and INT64 for `timestamp-micros`
+// rather than the proper DATE / TIMESTAMP logical types. The HMS-declared catalog type
+// must be downcast to match the scan output, otherwise the executor crashes with
+// "result vector of type DATE does not match expression type INTEGER" when projecting
+// the column. Recurses through LIST / STRUCT / MAP so nested date/timestamp fields are
+// also downcast.
+LogicalType HMSUtils::MapTypeForAvro(const LogicalType &hms_type) {
+	switch (hms_type.id()) {
+	case LogicalTypeId::DATE:
+		return LogicalType::INTEGER;
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_SEC:
+		return LogicalType::BIGINT;
+	case LogicalTypeId::LIST: {
+		auto &child_type = ListType::GetChildType(hms_type);
+		return LogicalType::LIST(MapTypeForAvro(child_type));
+	}
+	case LogicalTypeId::STRUCT: {
+		auto &child_types = StructType::GetChildTypes(hms_type);
+		child_list_t<LogicalType> mapped_children;
+		for (const auto &child : child_types) {
+			mapped_children.push_back(make_pair(child.first, MapTypeForAvro(child.second)));
+		}
+		return LogicalType::STRUCT(mapped_children);
+	}
+	case LogicalTypeId::MAP: {
+		auto &key_type = MapType::KeyType(hms_type);
+		auto &value_type = MapType::ValueType(hms_type);
+		return LogicalType::MAP(MapTypeForAvro(key_type), MapTypeForAvro(value_type));
+	}
+	default:
+		return hms_type;
+	}
+}
+
 string HMSUtils::LogicalTypeToHiveType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::TINYINT:

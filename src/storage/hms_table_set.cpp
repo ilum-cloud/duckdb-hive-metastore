@@ -48,6 +48,11 @@ void HMSTableSet::LoadEntries(ClientContext &context) {
 		CreateTableInfo info;
 		info.table = table.name;
 
+		// duckdb-avro 1.4 returns INT/BIGINT for Avro date/timestamp-micros logical
+		// types; the catalog type must be downcast to match. See HMSUtils::MapTypeForAvro.
+		bool is_avro = StringUtil::Contains(table.input_format, "Avro") ||
+		               StringUtil::Contains(table.serialization_lib, "Avro");
+
 		// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
 		vector<ColumnDefinition> discovered_columns;
 		if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, table, discovered_columns)) {
@@ -62,12 +67,18 @@ void HMSTableSet::LoadEntries(ClientContext &context) {
 				for (auto &col : spark_columns) {
 					// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
 					auto logical_type = TransformStringToLogicalType(col.type, context);
+					if (is_avro) {
+						logical_type = HMSUtils::MapTypeForAvro(logical_type);
+					}
 					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
 				}
 			} else {
 				// Fallback to standard HMS columns
 				for (auto &col : table.columns) {
 					auto logical_type = HMSUtils::TypeToLogicalType(context, col.type);
+					if (is_avro) {
+						logical_type = HMSUtils::MapTypeForAvro(logical_type);
+					}
 					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
 				}
 			}
@@ -157,6 +168,8 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 	result->table_data = make_uniq<HMSAPITable>(std::move(t));
 
 	// Resolve schema using the same logic as LoadEntries.
+	bool is_avro = StringUtil::Contains(result->table_data->input_format, "Avro") ||
+	               StringUtil::Contains(result->table_data->serialization_lib, "Avro");
 	// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
 	vector<ColumnDefinition> discovered_columns;
 	if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, *result->table_data, discovered_columns)) {
@@ -173,6 +186,9 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 			for (auto &col : spark_columns) {
 				// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
 				auto logical_type = TransformStringToLogicalType(col.type, context);
+				if (is_avro) {
+					logical_type = HMSUtils::MapTypeForAvro(logical_type);
+				}
 				result->create_info->columns.AddColumn(ColumnDefinition(col.name, logical_type));
 			}
 		} else {
@@ -180,6 +196,9 @@ unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSc
 			result->create_info->columns = CreateTableInfo().columns; // clear and re-fill
 			for (auto &c : result->table_data->columns) {
 				auto logical_type = HMSUtils::TypeToLogicalType(context, c.type);
+				if (is_avro) {
+					logical_type = HMSUtils::MapTypeForAvro(logical_type);
+				}
 				result->create_info->columns.AddColumn(ColumnDefinition(c.name, logical_type));
 			}
 		}

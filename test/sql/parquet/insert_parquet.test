@@ -102,7 +102,10 @@ SELECT id, name, score FROM hms.sample_db.duck_inserted_parquet WHERE id = 100;
 100	no-score	NULL
 
 # INSERT into Delta/Iceberg/Avro tables is still rejected — verify the error mentions the format.
+# duckdb-avro on 1.4 returns INT32 for Avro `date`, so the catalog reports ship_date as
+# INTEGER and we pass an INTEGER literal here to bypass the type-cast error and reach
+# the Avro-reject path. Restore the DATE literal once duckdb-avro 1.5+ ships on 1.4.
 statement error
-INSERT INTO hms.sample_db.shipments VALUES (999, 999, 'X', 'X', 'X', DATE '2024-01-01');
+INSERT INTO hms.sample_db.shipments VALUES (999, 999, 'X', 'X', 'X', 19723);
 ----
 INSERT

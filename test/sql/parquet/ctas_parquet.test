@@ -18,38 +18,23 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
-# CTAS from an existing HMS table — Parquet is the default format.
-statement ok
+# CTAS with WITH options is rejected at parse time on DuckDB 1.4
+# (TransformCreateTableAs refuses stmt.into->options). The full CTAS scenarios
+# are exercised on the 1.5+ branches; on 1.4 we only assert the parse-time error.
+statement error
 CREATE TABLE hms.sample_db.duck_ctas_customers
 WITH (location='s3a://test-bucket/duck_ctas_customers')
 AS
 SELECT customer_id, first_name, country
 FROM hms.sample_db.customers
 WHERE customer_id <= 10;
-
-# Verify the new table has the expected data.
-query III
-SELECT customer_id, first_name, country FROM hms.sample_db.duck_ctas_customers ORDER BY customer_id LIMIT 3;
 ----
-1	John	USA
-2	Jane	UK
-3	Bob	Canada
+Unimplemented features for CREATE TABLE as
 
-query I
-SELECT COUNT(*) FROM hms.sample_db.duck_ctas_customers;
-----
-10
-
-# CTAS from a literal VALUES list.
-statement ok
+statement error
 CREATE TABLE hms.sample_db.duck_ctas_literal
 WITH (location='s3a://test-bucket/duck_ctas_literal')
 AS
 SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(n, label);
-
-query II
-SELECT n, label FROM hms.sample_db.duck_ctas_literal ORDER BY n;
 ----
-1	a
-2	b
-3	c
+Unimplemented features for CREATE TABLE as

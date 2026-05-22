@@ -41,14 +41,13 @@ SELECT COUNT(*) FROM hms.sample_db.duck_inserted_csv;
 ----
 3
 
-# CTAS into a CSV table.
-statement ok
+# CTAS with WITH options is rejected at parse time on DuckDB 1.4
+# (TransformCreateTableAs refuses stmt.into->options). The CTAS path becomes
+# usable on 1.5+ where this restriction is lifted.
+statement error
 CREATE TABLE hms.sample_db.duck_ctas_csv
 WITH (format='csv', location='s3a://test-bucket/duck_ctas_csv')
 AS
 SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
-
-query I
-SELECT COUNT(*) FROM hms.sample_db.duck_ctas_csv;
 ----
-5
+Unimplemented features for CREATE TABLE as

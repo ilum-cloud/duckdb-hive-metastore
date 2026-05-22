@@ -21,8 +21,6 @@
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
-#include "duckdb/parser/expression/cast_expression.hpp"
-#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "hms_constants.hpp"
 #include "hms_format_detector.hpp"
@@ -110,65 +108,131 @@ void HMSCatalog::ClearCache() {
 	schemas.ClearEntries();
 }
 
+// Extract a `WITH (key='value', key=number, key=true|false)` clause from the original
+// CREATE TABLE SQL text and populate `tags`. DuckDB 1.4's CREATE TABLE transformer
+// silently drops `stmt.options`, so the only path that survives to the extension is
+// the raw SQL string on CreateInfo::sql. Handles single-quoted strings (with '' escapes),
+// integer / float literals, and unquoted true/false. Identifier keys are lowercased.
+// Idempotent: if `tags` is non-empty (e.g. a future DuckDB version starts populating it),
+// this is a no-op.
+static void ParseWithClauseIntoTags(const string &sql, InsertionOrderPreservingMap<string> &tags) {
+	if (sql.empty() || !tags.empty()) {
+		return;
+	}
+	string lower = StringUtil::Lower(sql);
+	idx_t search_from = 0;
+	while (true) {
+		auto with_pos = lower.find("with", search_from);
+		if (with_pos == string::npos) {
+			return;
+		}
+		search_from = with_pos + 4;
+		// Word-boundary check on both sides.
+		if (with_pos > 0 && (std::isalnum(static_cast<unsigned char>(lower[with_pos - 1])) || lower[with_pos - 1] == '_')) {
+			continue;
+		}
+		idx_t p = with_pos + 4;
+		while (p < lower.size() && std::isspace(static_cast<unsigned char>(lower[p]))) {
+			p++;
+		}
+		if (p >= lower.size() || lower[p] != '(') {
+			continue;
+		}
+		idx_t body_start = p + 1;
+		// Find matching ')' respecting single-quoted strings only.
+		idx_t cursor = body_start;
+		bool in_quote = false;
+		while (cursor < sql.size()) {
+			char c = sql[cursor];
+			if (in_quote) {
+				if (c == '\'' && cursor + 1 < sql.size() && sql[cursor + 1] == '\'') {
+					cursor += 2;
+					continue;
+				}
+				if (c == '\'') {
+					in_quote = false;
+				}
+			} else {
+				if (c == '\'') {
+					in_quote = true;
+				} else if (c == ')') {
+					break;
+				}
+			}
+			cursor++;
+		}
+		if (cursor >= sql.size()) {
+			return;
+		}
+		string body = sql.substr(body_start, cursor - body_start);
+
+		// Tokenize by top-level commas (single-quote aware).
+		vector<string> pairs;
+		string current;
+		in_quote = false;
+		for (idx_t i = 0; i < body.size(); i++) {
+			char c = body[i];
+			if (in_quote) {
+				current += c;
+				if (c == '\'' && i + 1 < body.size() && body[i + 1] == '\'') {
+					current += body[++i];
+					continue;
+				}
+				if (c == '\'') {
+					in_quote = false;
+				}
+			} else if (c == '\'') {
+				current += c;
+				in_quote = true;
+			} else if (c == ',') {
+				pairs.push_back(std::move(current));
+				current.clear();
+			} else {
+				current += c;
+			}
+		}
+		if (!current.empty()) {
+			pairs.push_back(std::move(current));
+		}
+
+		for (auto &pair : pairs) {
+			auto eq = pair.find('=');
+			if (eq == string::npos) {
+				continue;
+			}
+			string key = pair.substr(0, eq);
+			string raw_val = pair.substr(eq + 1);
+			StringUtil::Trim(key);
+			StringUtil::Trim(raw_val);
+			if (key.empty() || raw_val.empty()) {
+				continue;
+			}
+			// Strip surrounding quotes if any (identifier-quoted or string-literal).
+			string val;
+			if (raw_val.size() >= 2 && raw_val.front() == '\'' && raw_val.back() == '\'') {
+				val = raw_val.substr(1, raw_val.size() - 2);
+				// Collapse doubled single quotes.
+				val = StringUtil::Replace(val, "''", "'");
+			} else {
+				val = raw_val;
+			}
+			// Strip surrounding double quotes on keys (identifier form).
+			if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
+				key = key.substr(1, key.size() - 2);
+			}
+			tags[StringUtil::Lower(key)] = val;
+		}
+		return;
+	}
+}
+
 ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	auto &base = info.Base();
-	if (!base.partition_keys.empty()) {
-		return ErrorData(ExceptionType::CATALOG,
-		                 "PARTITIONED BY is not supported for tables in a hive_metastore catalog");
-	}
-	if (!base.sort_keys.empty()) {
-		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a hive_metastore catalog");
-	}
-	// Accept the WITH clause and copy its constant values (stringified) into `tags`, which the
-	// downstream HMSTableSet::CreateTable reads to drive format/location selection. Booleans like
-	// `external_table=true` parse as CAST('t' AS BOOLEAN), so a CastExpression over a constant
-	// is folded here. Non-constant expressions (e.g. function calls) are rejected — we don't
-	// bind expressions on the CREATE path.
-	for (auto &opt : base.options) {
-		if (!opt.second) {
-			continue;
-		}
-		Value val;
-		auto *expr = opt.second.get();
-		if (expr->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
-			val = expr->Cast<ConstantExpression>().value;
-		} else if (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
-			auto &cast_expr = expr->Cast<CastExpression>();
-			if (!cast_expr.child || cast_expr.child->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-				return ErrorData(
-				    ExceptionType::BINDER,
-				    StringUtil::Format("CREATE TABLE option '%s' must be a constant string literal", opt.first));
-			}
-			auto &inner = cast_expr.child->Cast<ConstantExpression>();
-			// Fold the cast where DuckDB has a registered implementation (covers numeric →
-			// numeric, VARCHAR → BOOLEAN for `true`/`t`/`false`/`f` via the postgres grammar,
-			// etc). The stored tag is the post-cast form (e.g. "true"/"false" for BOOLEAN).
-			// When the cast has no implementation, fall back to the inner constant; HMS
-			// treats tags as opaque strings so storing the raw value is still meaningful.
-			Value casted;
-			string cast_err;
-			if (inner.value.DefaultTryCastAs(cast_expr.cast_type, casted, &cast_err)) {
-				val = std::move(casted);
-			} else {
-				val = inner.value;
-			}
-		} else {
-			return ErrorData(
-			    ExceptionType::BINDER,
-			    StringUtil::Format("CREATE TABLE option '%s' must be a constant string literal", opt.first));
-		}
-		if (val.IsNull()) {
-			continue;
-		}
-		// Lowercase the key before storing. `InsertionOrderPreservingMap::find` is itself
-		// case-insensitive, but `BuildThriftTable` copies these tags verbatim into the
-		// Thrift `table.parameters` (a `std::map<string,string>` — case-sensitive) where
-		// later `find("location")` / external readers expect canonical lowercase keys.
-		// Without folding here, `WITH ("Format"='parquet')` would persist "Format" into
-		// HMS and silently mis-key downstream consumers.
-		base.tags[StringUtil::Lower(opt.first)] = val.ToString();
-	}
-	base.options.clear();
+	// DuckDB 1.4 does not parse PARTITIONED BY / SORTED BY on plain CREATE TABLE,
+	// and the CREATE TABLE transformer drops `stmt.options`. The original SQL is
+	// still available on CreateInfo::sql; recover the WITH clause from there so
+	// HMSTableSet::CreateTable can read location / format / external_table tags.
+	ParseWithClauseIntoTags(base.sql, base.tags);
 	return ErrorData();
 }
 
@@ -250,7 +314,7 @@ static PhysicalOperator &PlanHMSWrite(ClientContext &context, PhysicalPlanGenera
 		string delim = delim_it != hms_table.table_data->serde_parameters.end() ? delim_it->second : ",";
 		copy_info->options["delim"] = {Value(delim)};
 	}
-	CopyFunctionBindInput bind_input(*copy_info, function.function_info);
+	CopyFunctionBindInput bind_input(*copy_info);
 	bind_input.file_extension = function.extension;
 	auto bind_data = function.copy_to_bind(context, bind_input, column_names, column_types);
 

@@ -36,13 +36,15 @@ WITH (location='s3a://test-bucket/x', format=42);
 ----
 Unsupported table format
 
-# Non-constant WITH option (function call) is rejected up front because we don't
-# bind expressions on the CREATE path.
+# Non-constant WITH option (function call) on 1.4: the regex-based recovery of the
+# WITH clause from CreateInfo::sql treats the call as opaque text and forwards it
+# to HMS, which rejects the resulting LOCATION at Thrift bind time with a URI
+# parse error. On 1.5+ this would surface as "constant string literal".
 statement error
 CREATE TABLE hms.sample_db.duck_create_err_exproption (id INTEGER)
 WITH (location=concat('s3a://test-bucket/', 'x'), format='parquet');
 ----
-constant string literal
+URISyntaxException
 
 # Unknown format → BuildThriftTable rejects.
 statement error
