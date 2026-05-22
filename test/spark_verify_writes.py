@@ -163,12 +163,21 @@ def run_bidirectional_append(spark):
     location is shared.
     """
     failures = []
+    existing_tables = {row.tableName for row in spark.sql("SHOW TABLES IN sample_db").collect()}
 
     for table_short, baseline, rows in BIDIRECTIONAL_TARGETS:
         table = f"sample_db.{table_short}"
         append_rows = len(rows)
         expected_total = baseline + append_rows
         values_sql = ", ".join(rows)
+
+        # Skip silently when the DuckDB-side test that creates this table was itself
+        # skipped (e.g. avro tests gated by `require avro` when the avro extension
+        # is not built for the current DuckDB sha). The Spark write path is only
+        # meaningful when the DuckDB CREATE succeeded.
+        if table_short not in existing_tables:
+            print(f"⊘ bidirectional[{table_short}]: skipped — table not present in sample_db")
+            continue
 
         try:
             spark.sql(f"INSERT INTO {table} VALUES {values_sql}")

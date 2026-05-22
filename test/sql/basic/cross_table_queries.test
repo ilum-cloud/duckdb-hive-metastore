@@ -12,14 +12,12 @@ require httpfs
 
 require parquet
 
+require iceberg
+
+require delta
+
 # Disable skipping of HTTP errors to see actual failure messages
 set ignore_error_messages
-
-statement ok
-INSTALL iceberg; LOAD iceberg;
-
-statement ok
-INSTALL delta; LOAD delta;
 
 statement ok
 CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
