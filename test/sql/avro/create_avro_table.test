@@ -35,18 +35,20 @@ CREATE TABLE hms.sample_db.duck_created_avro (
     event_ts TIMESTAMP
 ) WITH (format='avro', location='s3a://test-bucket/duck_created_avro');
 
-# DATE and TIMESTAMP are preserved as-is — duckdb-avro v1.5+ resolves Avro's date/
-# timestamp-micros logical types and returns proper DATE/TIMESTAMP. We use
-# information_schema rather than DESCRIBE because the table has no files yet, and
-# DESCRIBE on an Avro table triggers a scan-binder which needs at least one file.
+# duckdb-avro on DuckDB 1.4 does not resolve Avro's date/timestamp-micros logical
+# types, so the catalog downcasts DATE -> INTEGER and TIMESTAMP -> BIGINT via
+# HMSUtils::MapTypeForAvro to match what read_avro actually returns. On 1.5+
+# branches both columns surface as DATE/TIMESTAMP. We use information_schema
+# rather than DESCRIBE because the table has no files yet, and DESCRIBE on an
+# Avro table triggers a scan-binder which needs at least one file.
 query TT
 SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_created_avro'
 ORDER BY column_name;
 ----
-event_date	DATE
-event_ts	TIMESTAMP
+event_date	INTEGER
+event_ts	BIGINT
 id	INTEGER
 name	VARCHAR
 score	DOUBLE

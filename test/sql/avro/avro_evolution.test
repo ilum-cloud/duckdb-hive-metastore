@@ -4,6 +4,11 @@
 
 # Scope note: Avro INSERT is not supported (PlanHMSWrite in hms_catalog.cpp only handles Parquet
 # and CSV). DROP-and-recreate is the only "schema evolution" path available today.
+#
+# DuckDB 1.4 note: duckdb-avro 1.4.4 does not resolve Avro `date` and `timestamp-micros`
+# logical types, so the catalog downcasts DATE -> INTEGER and TIMESTAMP -> BIGINT via
+# HMSUtils::MapTypeForAvro to match read_avro's actual scan output. On 1.5+ branches
+# these surface as DATE/TIMESTAMP throughout.
 # Spark-ALTER + DuckDB-re-attach is not testable from sqllogictest because post-seed mutations
 # require a separate shell step outside the test runner.
 
@@ -49,8 +54,8 @@ WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro
 ORDER BY column_name;
 ----
 amount	DECIMAL(10,2)
-event_date	DATE
-event_ts	TIMESTAMP
+event_date	INTEGER
+event_ts	BIGINT
 id	INTEGER
 label	VARCHAR
 
@@ -68,8 +73,8 @@ WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro
 ORDER BY column_name;
 ----
 amount	DECIMAL(10,2)
-event_date	DATE
-event_ts	TIMESTAMP
+event_date	INTEGER
+event_ts	BIGINT
 id	INTEGER
 label	VARCHAR
 
@@ -87,28 +92,32 @@ WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro
 ORDER BY column_name;
 ----
 amount	DECIMAL(10,2)
-event_date	DATE
-event_ts	TIMESTAMP
+event_date	INTEGER
+event_ts	BIGINT
 id	INTEGER
 label	VARCHAR
 
 # --- Scenario 2: INSERT into an Avro table is rejected ---
 # PlanHMSWrite throws NotImplementedException when format is not Parquet or CSV.
 # Expected error contains: "INSERT is not yet supported for the storage format"
+# DuckDB 1.4: event_date is INTEGER and event_ts is BIGINT here (see top-of-file
+# note); pass matching literals so the binder reaches the Avro rejection path
+# instead of failing on a DATE -> INTEGER cast.
 statement error
-INSERT INTO hms.sample_db.duck_avro_evo VALUES (1, 'x', 1.23, DATE '2024-01-01', TIMESTAMP '2024-01-01 00:00:00');
+INSERT INTO hms.sample_db.duck_avro_evo VALUES (1, 'x', 1.23, 19723, 1704067200000000);
 ----
 INSERT is not yet supported for the storage format
 
-# --- Scenario 3: CTAS targeting Avro format is rejected BEFORE the HMS entry is registered ---
-# PlanCreateTableAs pre-validates the requested format and throws NotImplementedException for
-# avro/delta/iceberg/orc before calling Catalog::CreateTable. No orphan metadata is left behind.
+# --- Scenario 3: CTAS with WITH options is rejected at parse on 1.4 ---
+# TransformCreateTableAs throws before PlanCreateTableAs ever runs, so the Avro
+# format-rejection branch isn't reachable here. On 1.5+ branches the error is
+# "CREATE TABLE AS is not supported for format 'avro'". Either way: no orphan.
 statement error
 CREATE TABLE hms.sample_db.duck_avro_evo_ctas
 WITH (format='avro', location='s3a://test-bucket/duck_avro_evo_ctas')
 AS SELECT 1 AS id, 'hello' AS label;
 ----
-CREATE TABLE AS is not supported for format 'avro'
+Unimplemented features for CREATE TABLE as
 
 # Pre-check rejection means no HMS entry was created.
 query I
@@ -141,8 +150,8 @@ WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro
 ORDER BY column_name;
 ----
 amount	DECIMAL(10,2)
-event_date	DATE
-event_ts	TIMESTAMP
+event_date	INTEGER
+event_ts	BIGINT
 extra_col	BIGINT
 id	INTEGER
 label	VARCHAR

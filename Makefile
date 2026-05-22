@@ -37,7 +37,7 @@ test-all: release
 	bash test/sql/oss/post_seed_schema_drift.sh
 	@echo ""
 	@echo "[6/6] Running tests..."
-	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
+	HMS_TEST_AVAILABLE=1 REMOTE_EXTENSIONS=1 ./build/release/test/unittest 'test*'
 	@echo ""
 	@echo "========================================"
 	@echo "Tests completed. Cleaning up..."
