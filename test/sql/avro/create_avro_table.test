@@ -8,14 +8,13 @@ require-env HMS_TEST_AVAILABLE
 
 require-env REMOTE_EXTENSIONS
 
+require avro
+
 require httpfs
 
 require parquet
 
 set ignore_error_messages
-
-statement ok
-FORCE INSTALL avro; LOAD avro;
 
 statement ok
 CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
