@@ -100,31 +100,17 @@ INSERT INTO hms.sample_db.duck_avro_evo VALUES (1, 'x', 1.23, DATE '2024-01-01',
 ----
 INSERT is not yet supported for the storage format
 
-# --- Scenario 3: CTAS targeting Avro format is also rejected ---
-# PlanCreateTableAs creates the HMS table entry first, then calls PlanHMSWrite which
-# throws. This leaves an orphan table in the metastore (same regression as ctas_orphan_metadata.test).
+# --- Scenario 3: CTAS targeting Avro format is rejected BEFORE the HMS entry is registered ---
+# PlanCreateTableAs pre-validates the requested format and throws NotImplementedException for
+# avro/delta/iceberg/orc before calling Catalog::CreateTable. No orphan metadata is left behind.
 statement error
 CREATE TABLE hms.sample_db.duck_avro_evo_ctas
 WITH (format='avro', location='s3a://test-bucket/duck_avro_evo_ctas')
 AS SELECT 1 AS id, 'hello' AS label;
 ----
-INSERT is not yet supported for the storage format
+CREATE TABLE AS is not supported for format 'avro'
 
-# REGRESSION-LOCK: PlanCreateTableAs registers the table in HMS before the write
-# executes. The Avro rejection above aborts the write but leaves the empty metadata
-# entry behind. When PlanCreateTableAs is fixed to roll back on write failure this
-# query will return 0 — flip the expected value and remove this comment.
-query I
-SELECT COUNT(*)
-FROM information_schema.tables
-WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_avro_evo_ctas';
-----
-1
-
-# Clean up the orphan left by the failed CTAS.
-statement ok
-DROP TABLE hms.sample_db.duck_avro_evo_ctas;
-
+# Pre-check rejection means no HMS entry was created.
 query I
 SELECT COUNT(*)
 FROM information_schema.tables
