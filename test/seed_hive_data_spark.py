@@ -598,7 +598,8 @@ def main():
     empty_df = spark.createDataFrame([], writable_schema)
     empty_df.coalesce(1).write.mode("overwrite").parquet(writable_path)
 
-    spark.sql(f"""
+    spark.sql(
+        f"""
         CREATE EXTERNAL TABLE sample_db.spark_writable_parquet (
             id INT,
             name STRING,
@@ -606,7 +607,8 @@ def main():
         )
         STORED AS PARQUET
         LOCATION '{writable_path}'
-    """)
+    """
+    )
     print("✓ Created empty 'spark_writable_parquet' (target for DuckDB INSERT tests)")
     print(f"   Location: {writable_path}")
 
@@ -637,7 +639,8 @@ def main():
 
     spark.sql("DROP TABLE IF EXISTS sample_db.cross_engine_parquet")
     cross_df.write.mode("overwrite").format("parquet").save(cross_path)
-    spark.sql(f"""
+    spark.sql(
+        f"""
         CREATE EXTERNAL TABLE sample_db.cross_engine_parquet (
             id INT,
             name STRING,
@@ -645,7 +648,8 @@ def main():
         )
         STORED AS PARQUET
         LOCATION '{cross_path}'
-    """)
+    """
+    )
     print(f"✓ Created 'cross_engine_parquet' table with 10 rows (Spark-written, DuckDB will INSERT more)")
     print(f"   Location: {cross_path}")
 

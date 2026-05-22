@@ -38,7 +38,6 @@ constexpr SchemeRewrite HMS_COMPATIBLE_SCHEMES[] = {
 };
 } // namespace
 
-
 string PathUtils::StripPlaceholder(const string &path) {
 	// Check for "-__PLACEHOLDER__" suffix
 	if (StringUtil::Contains(path, path::PLACEHOLDER_SUFFIX)) {
