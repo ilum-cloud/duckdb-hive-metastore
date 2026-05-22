@@ -571,12 +571,16 @@ def main():
 
     # Clear any prior files at the writable path so the table truly starts empty.
     # DROP TABLE removes HMS metadata only; external-table data files survive on S3
-    # unless explicitly deleted.
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(writable_path), hadoop_conf)
-    hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(writable_path)
-    if fs.exists(hadoop_path):
-        fs.delete(hadoop_path, True)
+    # unless explicitly deleted. Wrap the JVM call so a transient S3/JVM error here
+    # does not kill the entire seeder run.
+    try:
+        hadoop_conf = spark._jsc.hadoopConfiguration()
+        fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(writable_path), hadoop_conf)
+        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(writable_path)
+        if fs.exists(hadoop_path):
+            fs.delete(hadoop_path, True)
+    except Exception as cleanup_err:
+        print(f"   (warn) failed to clear {writable_path}: {cleanup_err}; continuing with overwrite mode")
 
     spark.sql("DROP TABLE IF EXISTS sample_db.spark_writable_parquet")
 
@@ -620,12 +624,16 @@ def main():
     cross_df = spark.createDataFrame(cross_data, cross_schema)
     cross_path = "s3a://test-bucket/cross_engine_parquet/"
 
-    # Clear any prior content so re-runs see exactly 10 rows initially.
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(cross_path), hadoop_conf)
-    hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(cross_path)
-    if fs.exists(hadoop_path):
-        fs.delete(hadoop_path, True)
+    # Clear any prior content so re-runs see exactly 10 rows initially. Wrap so a transient
+    # S3/JVM error does not kill the seeder; overwrite mode below still produces 10 rows.
+    try:
+        hadoop_conf = spark._jsc.hadoopConfiguration()
+        fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(cross_path), hadoop_conf)
+        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(cross_path)
+        if fs.exists(hadoop_path):
+            fs.delete(hadoop_path, True)
+    except Exception as cleanup_err:
+        print(f"   (warn) failed to clear {cross_path}: {cleanup_err}; continuing with overwrite mode")
 
     spark.sql("DROP TABLE IF EXISTS sample_db.cross_engine_parquet")
     cross_df.write.mode("overwrite").format("parquet").save(cross_path)
@@ -645,8 +653,9 @@ def main():
     # create their own tables inside the test rather than seeding here. Spark's bundled
     # Hadoop runtime does not include the hadoop-aliyun (oss) or hadoop-cos jars, so a
     # `CREATE EXTERNAL TABLE LOCATION 'oss://...'` triggers a FileSystem.get(oss://) lookup
-    # that fails with ClassNotFoundException. DuckDB's HMS extension stores LOCATION
-    # verbatim with no scheme validation, so the test can register the tables itself.
+    # that fails with ClassNotFoundException. DuckDB's HMS extension rewrites those schemes
+    # to s3a:// at HMS CREATE time (HMS only ships an s3a FileSystem) and back to s3:// at
+    # write time for httpfs, so the test can register the tables itself.
 
     # Display summary
     print("\n" + "=" * 80)

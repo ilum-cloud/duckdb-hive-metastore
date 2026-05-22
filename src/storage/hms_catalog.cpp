@@ -140,12 +140,11 @@ ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 				    StringUtil::Format("CREATE TABLE option '%s' must be a constant string literal", opt.first));
 			}
 			auto &inner = cast_expr.child->Cast<ConstantExpression>();
-			// Try to fold the cast (covers numeric → numeric, etc). When the default cast
-			// path lacks an implementation — notably VARCHAR → BOOLEAN for `true`/`false`,
-			// which the postgres grammar emits as CAST('t'/'f' AS BOOLEAN) — fall back to
-			// the inner string value. The stored tag is the raw constant ("t"/"f") rather
-			// than the post-cast form ("true"/"false"); HMS treats tags as opaque strings
-			// so the round-trip is preserved.
+			// Fold the cast where DuckDB has a registered implementation (covers numeric →
+			// numeric, VARCHAR → BOOLEAN for `true`/`t`/`false`/`f` via the postgres grammar,
+			// etc). The stored tag is the post-cast form (e.g. "true"/"false" for BOOLEAN).
+			// When the cast has no implementation, fall back to the inner constant; HMS
+			// treats tags as opaque strings so storing the raw value is still meaningful.
 			Value casted;
 			string cast_err;
 			if (inner.value.DefaultTryCastAs(cast_expr.cast_type, casted, &cast_err)) {
@@ -161,7 +160,13 @@ ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 		if (val.IsNull()) {
 			continue;
 		}
-		base.tags[opt.first] = val.ToString();
+		// Lowercase the key before storing. `InsertionOrderPreservingMap::find` is itself
+		// case-insensitive, but `BuildThriftTable` copies these tags verbatim into the
+		// Thrift `table.parameters` (a `std::map<string,string>` — case-sensitive) where
+		// later `find("location")` / external readers expect canonical lowercase keys.
+		// Without folding here, `WITH ("Format"='parquet')` would persist "Format" into
+		// HMS and silently mis-key downstream consumers.
+		base.tags[StringUtil::Lower(opt.first)] = val.ToString();
 	}
 	base.options.clear();
 	return ErrorData();
@@ -190,6 +195,12 @@ static PhysicalOperator &PlanHMSWrite(ClientContext &context, PhysicalPlanGenera
 		    "INSERT into partitioned HMS tables is not yet supported (table '%s'). Drop partition keys or use a "
 		    "non-partitioned table.",
 		    hms_table.name);
+	}
+	// Refuse writes when the HMS-stored location is empty: `JoinDirAndFile("", "data_<uuid>.…")`
+	// would yield a relative filename and INSERT would silently write to the DuckDB process cwd.
+	if (hms_table.table_data->storage_location.empty()) {
+		throw IOException("HMS table '%s' has no storage_location set in the metastore; refusing to write",
+		                  hms_table.name);
 	}
 
 	auto format_result = hms::FormatDetector::Detect(*hms_table.table_data);
@@ -297,18 +308,41 @@ PhysicalOperator &HMSCatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 
 PhysicalOperator &HMSCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                 LogicalCreateTable &op, PhysicalOperator &plan) {
-	// Materialize the HMS table now via the schema's CreateTable path. This is a side effect at
-	// plan time (matching DuckCatalog's general approach for CTAS); if the subsequent write fails,
-	// the metastore is left with an empty table that the user must drop manually until DROP TABLE
-	// lands.
-	// Route through Catalog::CreateTable so SupportsCreateTable() runs and moves WITH-clause
-	// options (location, format) from base.options into base.tags, where HMSTableSet::CreateTable
-	// reads them.
+	// Pre-validate the requested format BEFORE registering the table in HMS. Without this guard,
+	// CTAS to an unsupported format (avro/delta/iceberg/orc) creates the metastore entry, then
+	// PlanHMSWrite throws NotImplementedException — leaving an orphan entry that the user has to
+	// DROP manually. Force WITH-clause options to be folded into tags first; SupportsCreateTable
+	// is idempotent (it clears base.options after the first pass), so calling it here and again
+	// from inside Catalog::CreateTable below is harmless.
+	auto support_err = SupportsCreateTable(*op.info);
+	if (support_err.HasError()) {
+		support_err.Throw();
+	}
+	auto &base = op.info->Base();
+	string fmt;
+	auto fmt_it = base.tags.find("format");
+	if (fmt_it != base.tags.end()) {
+		fmt = fmt_it->second;
+	} else {
+		auto prov_it = base.tags.find("provider");
+		if (prov_it != base.tags.end()) {
+			fmt = prov_it->second;
+		}
+	}
+	fmt = StringUtil::Lower(fmt);
+	StringUtil::Trim(fmt);
+	if (!fmt.empty() && fmt != hms::format::PARQUET && fmt != hms::format::CSV) {
+		throw NotImplementedException(
+		    "CREATE TABLE AS is not supported for format '%s' on HMS tables (only Parquet and CSV are writable).", fmt);
+	}
+
+	// Route through Catalog::CreateTable so the schema-level CreateTable path runs (consistent
+	// with non-CTAS CREATE TABLE). If the subsequent write fails after this point we leave an
+	// empty entry behind — that case is exercised by test/sql/parquet/ctas_orphan_metadata.test.
 	auto transaction = GetCatalogTransaction(context);
 	auto created_entry = CreateTable(transaction, op.schema, *op.info);
 	if (!created_entry) {
-		throw IOException("CREATE TABLE AS: failed to register table '%s' in the Hive Metastore",
-		                  op.info->Base().table);
+		throw IOException("CREATE TABLE AS: failed to register table '%s' in the Hive Metastore", base.table);
 	}
 	auto &hms_table = created_entry->Cast<HMSTableEntry>();
 	return PlanHMSWrite(context, planner, hms_table, plan, op.types, op.estimated_cardinality);

@@ -34,7 +34,10 @@ public:
 	void CreateTable(const Apache::Hadoop::Hive::Table &table);
 	// Drop a table from the metastore. delete_data=false preserves the underlying
 	// storage files (we treat HMS as a pure catalog and do not own the bucket layout).
-	void DropTable(const string &db_name, const string &table_name, bool delete_data);
+	// Returns true if the table was dropped, false if it did not exist. Other Thrift
+	// errors (transport, auth, MetaException) are re-thrown so callers can distinguish
+	// "missing" from "broken" — needed for IF EXISTS to behave correctly.
+	bool DropTable(const string &db_name, const string &table_name, bool delete_data);
 
 private:
 	string host;

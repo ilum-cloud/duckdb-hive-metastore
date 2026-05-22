@@ -179,10 +179,12 @@ string PathUtils::BuildGlobPattern(const string &path, const FormatDetectionResu
 		glob = is_partitioned ? "/**/*.parquet" : "/*.parquet";
 	} else if (format.IsAvro()) {
 		// Hive's AvroContainerOutputFormat writes files with no extension
-		// (e.g. `000000_0`), while Spark's `format("avro")` writer and DuckDB's
-		// CTAS path use `.avro`. Match any non-underscore-prefixed file so both
-		// naming conventions resolve. The `_` prefix exclusion drops Hive marker
-		// files like `_SUCCESS` and `_temporary` from the scan.
+		// (e.g. `000000_0`), while Spark's `format("avro")` writer uses `.avro`.
+		// Match any non-underscore-prefixed file so both naming conventions
+		// resolve. The `_` prefix exclusion drops Hive marker files (`_SUCCESS`,
+		// `_temporary`); as a side effect any user-named file starting with `_`
+		// is also skipped — matches the CSV branch below and the Hive
+		// convention of treating leading underscores as "hidden".
 		glob = is_partitioned ? "/**/[!_]*" : "/[!_]*";
 	} else {
 		// For CSV/Text, use * to match any file
