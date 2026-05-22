@@ -23,11 +23,6 @@ public:
 	//! Returns true if successful and populates columns, false otherwise
 	static bool ParseSparkSchema(const map<string, string> &parameters, vector<HMSAPIColumnDefinition> &columns);
 
-	//! Map Avro-incompatible types to Avro-compatible equivalents
-	//! Avro has limited type support, so types like DATE are stored as INT32 (days since epoch)
-	//! This function converts the HMS schema types to match what the Avro extension actually returns
-	static LogicalType MapTypeForAvro(const LogicalType &hms_type);
-
 	// Convert DuckDB LogicalType to a Hive-compatible type string (e.g. int, bigint, string, array<int>)
 	static string LogicalTypeToHiveType(const LogicalType &type);
 

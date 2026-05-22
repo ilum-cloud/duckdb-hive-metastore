@@ -1,0 +1,141 @@
+# name: test/sql/csv/insert_csv_options.test
+# description: Pin the CSV write+read contract — what the extension stores and what survives a round-trip
+# group: [csv]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# --- Scenario 1: embedded comma in VARCHAR ---
+# BuildThriftTable hard-codes field.delim="," in the SerDe; the read path uses strict mode
+# (quote="", escape="", auto_detect=false, ignore_errors=true). DuckDB's CSV writer quotes
+# values containing the delimiter ("hello, world" → "hello, world" in file). With quoting
+# disabled on the reader, the quoted value parses as three fields instead of two, and
+# ignore_errors drops the row. This is the current contract: embedded commas corrupt the
+# round-trip — the offending row is silently lost on read.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvopt_comma (
+    id INTEGER,
+    val VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_csvopt_comma');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvopt_comma VALUES (1, 'plain'), (2, 'hello, world');
+
+# 'plain' round-trips cleanly; the embedded-comma row is dropped by the strict-mode reader
+# because the writer's quoting produces a three-field line that ignore_errors discards.
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_comma ORDER BY id;
+----
+1	plain
+
+# --- Scenario 2: NULL round-trips correctly ---
+# DuckDB's CSV writer emits an empty field for NULL. DuckDB's CSV reader default nullstr is ""
+# (empty string), so an empty unquoted field is read back as NULL.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvopt_null (
+    id INTEGER,
+    val VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_csvopt_null');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvopt_null VALUES (1, 'present'), (2, NULL);
+
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_null ORDER BY id;
+----
+1	present
+2	NULL
+
+# --- Scenario 3: embedded double-quote in VARCHAR ---
+# The CSV writer escapes an embedded double-quote by wrapping the field and doubling the quote
+# (e.g. she said "hi" → "she said ""hi"""). With strict-mode reader (quote=""), neither the
+# outer quotes nor the doubled inner quotes are interpreted — the raw bytes come back as written.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvopt_quote (
+    id INTEGER,
+    val VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_csvopt_quote');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvopt_quote VALUES (1, 'normal'), (2, 'say "hi"');
+
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_quote ORDER BY id;
+----
+1	normal
+2	"say ""hi"""
+
+# --- Scenario 4: empty string vs NULL serialization asymmetry ---
+# DuckDB's CSV writer quotes an empty string (`''` → `""`) and writes NULL as an
+# empty unquoted field. The strict-mode reader (quote="", escape="") leaves the
+# literal `""` intact for the empty-string row, while the empty unquoted field
+# for the NULL row hits the default `nullstr=""` and is read back as NULL.
+# Net effect: empty string survives as the 2-character literal `""`; NULL stays NULL.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvopt_emptystr (
+    id INTEGER,
+    val VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_csvopt_emptystr');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvopt_emptystr VALUES (1, ''), (2, NULL);
+
+# Empty string round-trips as the literal `""`; NULL stays NULL.
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_emptystr ORDER BY id;
+----
+1	""
+2	NULL
+
+# --- Scenario 5: field.delim WITH-option is accepted but ignored at CREATE ---
+# The WITH-option goes into table parameters (tags), not into SerDe. The SerDe always
+# gets field.delim="," regardless. This CREATE must succeed, and reads use "," as delimiter.
+# "field.delim" uses SQL double-quote quoting because the key contains a dot.
+statement ok
+CREATE TABLE hms.sample_db.duck_csvopt_custom_delim (
+    id INTEGER,
+    val VARCHAR
+) WITH (format='csv', location='s3a://test-bucket/duck_csvopt_custom_delim', "field.delim"='|');
+
+statement ok
+INSERT INTO hms.sample_db.duck_csvopt_custom_delim VALUES (1, 'foo'), (2, 'bar');
+
+# The actual delimiter stored in SerDe is always "," — INSERT and SELECT both use ",".
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_custom_delim ORDER BY id;
+----
+1	foo
+2	bar
+
+# --- Scenario 6: DETACH / ATTACH round-trip (cold load) ---
+# Confirms the SerDe state is persisted in HMS and survives catalog eviction.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_null ORDER BY id;
+----
+1	present
+2	NULL
+
+query II
+SELECT id, val FROM hms.sample_db.duck_csvopt_custom_delim ORDER BY id;
+----
+1	foo
+2	bar

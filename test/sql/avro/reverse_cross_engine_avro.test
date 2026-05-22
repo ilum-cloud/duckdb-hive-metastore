@@ -1,0 +1,60 @@
+# name: test/sql/avro/reverse_cross_engine_avro.test
+# description: DuckDB reads rows that Spark wrote into a DuckDB-created Avro table.
+# group: [avro]
+
+# Asserts the README ⁵ promise: DuckDB CREATE TABLE for Avro produces an HMS
+# entry that is "interoperable with Spark/Hive writers immediately". Since
+# duckdb-avro is read-only, the write half of that interop can only be
+# exercised via Spark — this test closes the loop on the DuckDB read side.
+#
+# Ordering: gated by CROSS_ENGINE_POST_SPARK so this test runs ONLY in Tier 8
+# of `make test-spark-verify`, after spark_verify_writes.py has appended rows
+# into duck_created_avro_simple in bidirectional mode. In a plain `make
+# test-all` run the env var is unset and the test is silently skipped.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require-env REMOTE_EXTENSIONS
+
+require-env CROSS_ENGINE_POST_SPARK
+
+require avro
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Spark inserted exactly two rows (see BIDIRECTIONAL_TARGETS in
+# test/spark_verify_writes.py for the literal VALUES). DuckDB must see both
+# via the HMS-registered Avro scan.
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_created_avro_simple;
+----
+2
+
+query IT
+SELECT id, label FROM hms.sample_db.duck_created_avro_simple ORDER BY id;
+----
+1	spark_avro_1
+2	spark_avro_2
+
+# DETACH / ATTACH round-trip — the table was created by DuckDB, populated by
+# Spark, and must remain readable from a fresh DuckDB catalog load.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_created_avro_simple;
+----
+2
