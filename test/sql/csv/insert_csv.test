@@ -51,3 +51,19 @@ AS
 SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
 ----
 Unimplemented features for CREATE TABLE as
+
+# CTAS-equivalent two-step (CREATE + INSERT-SELECT) so Spark's cross-engine
+# verifier sees duck_ctas_csv. The CTAS path itself is blocked at parse time
+# on 1.4 (see statement error above).
+statement ok
+CREATE TABLE hms.sample_db.duck_ctas_csv (customer_id INTEGER, first_name VARCHAR)
+WITH (format='csv', location='s3a://test-bucket/duck_ctas_csv');
+
+statement ok
+INSERT INTO hms.sample_db.duck_ctas_csv
+SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_ctas_csv;
+----
+5

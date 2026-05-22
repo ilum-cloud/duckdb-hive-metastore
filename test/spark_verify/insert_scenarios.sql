@@ -34,10 +34,13 @@ WITH (format='parquet', location='s3a://test-bucket/xverify_parquet_ins/');
 INSERT INTO hms.sample_db.xverify_parquet_ins VALUES (1, 'a'), (2, 'b'), (3, 'c');
 
 -- Parquet CTAS scenario.
+-- DuckDB 1.4 note: CTAS-with-WITH-clause is rejected at parse ("Unimplemented
+-- features for CREATE TABLE as"). Use CREATE + INSERT-SELECT as equivalent.
 DROP TABLE IF EXISTS hms.sample_db.xverify_parquet_ctas;
-CREATE TABLE hms.sample_db.xverify_parquet_ctas
-WITH (format='parquet', location='s3a://test-bucket/xverify_parquet_ctas/')
-AS SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
+CREATE TABLE hms.sample_db.xverify_parquet_ctas (customer_id INTEGER, first_name VARCHAR)
+WITH (format='parquet', location='s3a://test-bucket/xverify_parquet_ctas/');
+INSERT INTO hms.sample_db.xverify_parquet_ctas
+SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 5;
 
 -- CSV INSERT scenario.
 DROP TABLE IF EXISTS hms.sample_db.xverify_csv_ins;
@@ -45,10 +48,11 @@ CREATE TABLE hms.sample_db.xverify_csv_ins (id INTEGER, label VARCHAR)
 WITH (format='csv', location='s3a://test-bucket/xverify_csv_ins/');
 INSERT INTO hms.sample_db.xverify_csv_ins VALUES (1, 'alpha'), (2, 'beta');
 
--- CSV CTAS scenario. WITH-clause-before-AS form matches test/sql/csv/insert_csv.test.
+-- CSV CTAS scenario. See Parquet CTAS note above re: 1.4 CTAS-with-WITH.
 DROP TABLE IF EXISTS hms.sample_db.xverify_csv_ctas;
-CREATE TABLE hms.sample_db.xverify_csv_ctas
-WITH (format='csv', location='s3a://test-bucket/xverify_csv_ctas/')
-AS SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 4;
+CREATE TABLE hms.sample_db.xverify_csv_ctas (customer_id INTEGER, first_name VARCHAR)
+WITH (format='csv', location='s3a://test-bucket/xverify_csv_ctas/');
+INSERT INTO hms.sample_db.xverify_csv_ctas
+SELECT customer_id, first_name FROM hms.sample_db.customers WHERE customer_id <= 4;
 
 DETACH hms;
