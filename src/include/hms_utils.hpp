@@ -23,13 +23,15 @@ public:
 	//! Returns true if successful and populates columns, false otherwise
 	static bool ParseSparkSchema(const map<string, string> &parameters, vector<HMSAPIColumnDefinition> &columns);
 
-	//! Map Avro-incompatible types to Avro-compatible equivalents
-	//! Avro has limited type support, so types like DATE are stored as INT32 (days since epoch)
-	//! This function converts the HMS schema types to match what the Avro extension actually returns
-	static LogicalType MapTypeForAvro(const LogicalType &hms_type);
-
 	// Convert DuckDB LogicalType to a Hive-compatible type string (e.g. int, bigint, string, array<int>)
 	static string LogicalTypeToHiveType(const LogicalType &type);
+
+	// duckdb-avro on DuckDB 1.4 does not resolve Avro `date` and `timestamp-micros`
+	// logical types: read_avro returns INT32 / INT64 instead of DATE / TIMESTAMP, so the
+	// HMS-declared catalog type must be downcast to match the scan output. Newer
+	// (1.5.1+) duckdb-avro resolves these natively; on those versions this function
+	// is unused.
+	static LogicalType MapTypeForAvro(const LogicalType &hms_type);
 
 	// Build a Thrift Table object from a BoundCreateTableInfo / CreateTableInfo
 	static Apache::Hadoop::Hive::Table BuildThriftTable(ClientContext &context, HMSSchemaEntry &schema,

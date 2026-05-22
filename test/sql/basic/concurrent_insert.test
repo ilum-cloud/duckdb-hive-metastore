@@ -1,0 +1,80 @@
+# name: test/sql/basic/concurrent_insert.test
+# description: Test that 8 concurrent sessions each INSERT into a single HMS Parquet table without collision — each produces a distinct UUID-suffixed file
+# group: [basic]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+# Pre-create the table in the main session so worker sessions only need to INSERT.
+# Concurrent CREATE TABLE calls would race on the HMS thrift server and likely fail.
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+statement ok
+CREATE TABLE hms.sample_db.duck_concurrent_writes (
+    i INTEGER,
+    tag VARCHAR
+) WITH (format='parquet', location='s3a://test-bucket/duck_concurrent_writes/');
+
+# Concurrentloop workers share the main session's DatabaseInstance, so the `s3`
+# secret and the `hms` attached catalog created above are visible to every worker
+# connection. No per-worker ATTACH or CREATE SECRET is needed; each worker only
+# issues its INSERT, which is what we actually want to stress.
+#
+# UUID collision avoidance: PhysicalCopyToFile generates a UUID-suffixed filename per
+# INSERT statement and runs with parallel=false. Two concurrent INSERTs therefore write
+# to two distinct filenames even though they target the same table location — no
+# coordination is needed between sessions.
+#
+# Concurrency is capped at 8 to keep HMS thrift contention low. Higher numbers risk
+# transient thrift timeouts that would surface as flaky CI failures rather than real bugs.
+concurrentloop i 0 8
+
+statement ok
+INSERT INTO hms.sample_db.duck_concurrent_writes
+SELECT j AS i, 'tag_' || ${i}::VARCHAR AS tag FROM range(100) t(j);
+
+endloop
+
+# 8 sessions × 100 rows each = 800 total rows.
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_concurrent_writes;
+----
+800
+
+# 8 distinct tag values (tag_0 through tag_7) — one per concurrent session.
+query I
+SELECT COUNT(DISTINCT tag) FROM hms.sample_db.duck_concurrent_writes;
+----
+8
+
+# Each INSERT runs with parallel=false and generates its own UUID-suffixed file.
+# 8 concurrent INSERTs must produce exactly 8 distinct files in the table location.
+# If any two sessions wrote to the same file, data would be lost and this assertion fails.
+query I
+SELECT COUNT(DISTINCT filename) FROM read_parquet('s3://test-bucket/duck_concurrent_writes/*.parquet', filename=true);
+----
+8
+
+# DETACH/ATTACH round-trip to verify the catalog entry survives post-contention and
+# the cold LoadEntries path returns the same row count as the warm in-process entry.
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query I
+SELECT COUNT(*) FROM hms.sample_db.duck_concurrent_writes;
+----
+800

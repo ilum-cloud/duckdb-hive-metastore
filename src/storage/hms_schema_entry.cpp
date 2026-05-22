@@ -1,4 +1,5 @@
 #include "storage/hms_schema_entry.hpp"
+#include "storage/hms_catalog.hpp"
 #include "storage/hms_table_entry.hpp"
 #include "storage/hms_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
@@ -32,6 +33,12 @@ optional_ptr<CatalogEntry> HMSSchemaEntry::CreateTable(CatalogTransaction transa
 	auto table_name = base_info.table;
 	if (base_info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 		throw NotImplementedException("REPLACE ON CONFLICT in CreateTable");
+	}
+	// DuckDB 1.4 has no Catalog::SupportsCreateTable hook; invoke the validator manually
+	// so WITH-clause options get folded into tags before HMSTableSet::CreateTable runs.
+	auto support_err = catalog.Cast<HMSCatalog>().SupportsCreateTable(info);
+	if (support_err.HasError()) {
+		support_err.Throw();
 	}
 	return tables.CreateTable(transaction.GetContext(), info);
 }

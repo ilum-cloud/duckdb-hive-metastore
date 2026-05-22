@@ -1,0 +1,41 @@
+# name: test/sql/parquet/ctas_orphan_metadata.test
+# description: Regression lock for orphan HMS metadata left behind by a failed CTAS
+# group: [parquet]
+
+# REGRESSION-LOCK: PlanCreateTableAs in src/storage/hms_catalog.cpp materializes
+# the HMS table BEFORE the write executes. On 1.5+ this leaves an orphan row in
+# HMS when the SELECT fails; on 1.4 the CTAS path never reaches PlanCreateTableAs
+# because TransformCreateTableAs rejects `stmt.into->options` at parse time, so
+# no orphan can ever be created from this path.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# CTAS with WITH options is rejected at parse on 1.4. Assert the parse error and
+# confirm no orphan metadata was created.
+statement error
+CREATE TABLE hms.sample_db.duck_orphan_div0
+WITH (location='s3a://test-bucket/duck_orphan_div0')
+AS
+SELECT customer_id, error('forced CTAS failure') AS bad FROM hms.sample_db.customers LIMIT 5;
+----
+Unimplemented features for CREATE TABLE as
+
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_orphan_div0';
+----
+0

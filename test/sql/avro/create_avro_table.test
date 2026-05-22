@@ -1,0 +1,76 @@
+# name: test/sql/avro/create_avro_table.test
+# description: Test creating an Avro table via HMS CREATE TABLE
+# group: [avro]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require-env REMOTE_EXTENSIONS
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# CREATE TABLE with explicit Avro format and location.
+# Uses s3a:// so the underlying object store is unambiguous; the extension
+# rewrites the scheme to s3:// at scan time.
+statement ok
+CREATE TABLE hms.sample_db.duck_created_avro (
+    id INTEGER,
+    name VARCHAR,
+    score DOUBLE,
+    event_date DATE,
+    event_ts TIMESTAMP
+) WITH (format='avro', location='s3a://test-bucket/duck_created_avro');
+
+# duckdb-avro on DuckDB 1.4 does not resolve Avro's date/timestamp-micros logical
+# types, so the catalog downcasts DATE -> INTEGER and TIMESTAMP -> BIGINT via
+# HMSUtils::MapTypeForAvro to match what read_avro actually returns. On 1.5+
+# branches both columns surface as DATE/TIMESTAMP. We use information_schema
+# rather than DESCRIBE because the table has no files yet, and DESCRIBE on an
+# Avro table triggers a scan-binder which needs at least one file.
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_created_avro'
+ORDER BY column_name;
+----
+event_date	INTEGER
+event_ts	BIGINT
+id	INTEGER
+name	VARCHAR
+score	DOUBLE
+
+# Reject duplicate creation (HMS returns AlreadyExistsException via Thrift).
+statement error
+CREATE TABLE hms.sample_db.duck_created_avro (id INTEGER)
+WITH (format='avro', location='s3a://test-bucket/duck_created_avro');
+----
+
+# Simpler Avro table with only Avro-native types (no DATE/TIMESTAMP mapping).
+statement ok
+CREATE TABLE hms.sample_db.duck_created_avro_simple (
+    id BIGINT,
+    label VARCHAR
+) WITH (format='avro', location='s3a://test-bucket/duck_created_avro_simple');
+
+query TT
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_created_avro_simple'
+ORDER BY column_name;
+----
+id	BIGINT
+label	VARCHAR

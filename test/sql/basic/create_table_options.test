@@ -1,0 +1,90 @@
+# name: test/sql/basic/create_table_options.test
+# description: Negative paths for CREATE TABLE — WITH-clause validation and
+# group: [basic]
+
+#              LOCATION / WAREHOUSE_LOCATION requirement.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+set ignore_error_messages
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# Attached without WAREHOUSE_LOCATION on purpose, so the LOCATION-missing path
+# triggers the binder error rather than auto-derivation.
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Missing LOCATION + no WAREHOUSE_LOCATION → must error with a specific message.
+statement error
+CREATE TABLE hms.sample_db.duck_create_err_noloc (id INTEGER);
+----
+LOCATION
+
+# Integer option (`format=42`) survives SupportsCreateTable as a constant — it's
+# stringified to "42" — and then trips the format whitelist with a clear message.
+statement error
+CREATE TABLE hms.sample_db.duck_create_err_intopt (id INTEGER)
+WITH (location='s3a://test-bucket/x', format=42);
+----
+Unsupported table format
+
+# Non-constant WITH option (function call) on 1.4: the regex-based recovery of the
+# WITH clause from CreateInfo::sql treats the call as opaque text and forwards it
+# to HMS, which rejects the resulting LOCATION at Thrift bind time with a URI
+# parse error. On 1.5+ this would surface as "constant string literal".
+statement error
+CREATE TABLE hms.sample_db.duck_create_err_exproption (id INTEGER)
+WITH (location=concat('s3a://test-bucket/', 'x'), format='parquet');
+----
+URISyntaxException
+
+# Unknown format → BuildThriftTable rejects.
+statement error
+CREATE TABLE hms.sample_db.duck_create_err_badfmt (id INTEGER)
+WITH (location='s3a://test-bucket/y', format='quokka');
+----
+Unsupported table format
+
+# PARTITIONED BY is explicitly rejected by SupportsCreateTable (separate work).
+statement error
+CREATE TABLE hms.sample_db.duck_create_err_partitioned (id INTEGER, p INTEGER)
+WITH (location='s3a://test-bucket/z', format='parquet')
+PARTITIONED BY (p);
+----
+PARTITIONED BY
+
+# Quoted mixed-case option keys must be normalized so the downstream
+# case-sensitive `tags.find("format")` lookup still matches.
+statement ok
+CREATE TABLE hms.sample_db.duck_create_mixedcase_opt (id INTEGER)
+WITH ("Format"='parquet', "Location"='s3a://test-bucket/mixedcase');
+
+statement ok
+DROP TABLE hms.sample_db.duck_create_mixedcase_opt;
+
+# Re-attach with WAREHOUSE_LOCATION and verify CREATE without LOCATION now works
+# (the warehouse-default path).
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, WAREHOUSE_LOCATION 's3a://test-bucket/warehouse');
+
+statement ok
+CREATE TABLE hms.sample_db.duck_create_managed (id INTEGER, label VARCHAR);
+
+# Table should be visible in the catalog without an explicit LOCATION because
+# the WAREHOUSE_LOCATION resolved the path.
+query I
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_catalog='hms' AND table_schema='sample_db' AND table_name='duck_create_managed';
+----
+1
