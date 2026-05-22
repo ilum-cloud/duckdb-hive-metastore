@@ -432,13 +432,11 @@ def main():
     products_df.write.format("delta").mode("overwrite").save(delta_path)
 
     # Create table in metastore pointing to Delta location
-    spark.sql(
-        f"""
+    spark.sql(f"""
         CREATE TABLE sample_db.products
         USING delta
         LOCATION '{delta_path}'
-    """
-    )
+    """)
     print(f"✓ Created 'products' table with {products_df.count()} rows in Delta format")
     print(f"   Location: {delta_path}")
 
@@ -451,8 +449,7 @@ def main():
     orders_df.write.mode("overwrite").format("csv").option("header", "true").save(csv_path)
 
     # Then create external table pointing to CSV files
-    spark.sql(
-        f"""
+    spark.sql(f"""
         CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.orders (
             order_id INT,
             customer_id INT,
@@ -467,8 +464,7 @@ def main():
         STORED AS TEXTFILE
         LOCATION '{csv_path}'
         TBLPROPERTIES ('skip.header.line.count'='1')
-    """
-    )
+    """)
     print(f"✓ Created 'orders' table with {orders_df.count()} rows in CSV format")
     print(f"   Location: {csv_path}")
 
@@ -515,8 +511,7 @@ def main():
         shipments_df.write.mode("overwrite").format("avro").save(avro_path)
 
         # Create external table pointing to Avro files
-        spark.sql(
-            f"""
+        spark.sql(f"""
             CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.shipments (
                 shipment_id INT,
                 order_id INT,
@@ -527,8 +522,7 @@ def main():
             )
             STORED AS AVRO
             LOCATION '{avro_path}'
-        """
-        )
+        """)
         print(f"✓ Created 'shipments' table with {shipments_df.count()} rows in Avro format")
         print(f"   Location: {avro_path}")
     except Exception as e:
@@ -598,8 +592,7 @@ def main():
     empty_df = spark.createDataFrame([], writable_schema)
     empty_df.coalesce(1).write.mode("overwrite").parquet(writable_path)
 
-    spark.sql(
-        f"""
+    spark.sql(f"""
         CREATE EXTERNAL TABLE sample_db.spark_writable_parquet (
             id INT,
             name STRING,
@@ -607,8 +600,7 @@ def main():
         )
         STORED AS PARQUET
         LOCATION '{writable_path}'
-    """
-    )
+    """)
     print("✓ Created empty 'spark_writable_parquet' (target for DuckDB INSERT tests)")
     print(f"   Location: {writable_path}")
 
@@ -639,8 +631,7 @@ def main():
 
     spark.sql("DROP TABLE IF EXISTS sample_db.cross_engine_parquet")
     cross_df.write.mode("overwrite").format("parquet").save(cross_path)
-    spark.sql(
-        f"""
+    spark.sql(f"""
         CREATE EXTERNAL TABLE sample_db.cross_engine_parquet (
             id INT,
             name STRING,
@@ -648,8 +639,7 @@ def main():
         )
         STORED AS PARQUET
         LOCATION '{cross_path}'
-    """
-    )
+    """)
     print(f"✓ Created 'cross_engine_parquet' table with 10 rows (Spark-written, DuckDB will INSERT more)")
     print(f"   Location: {cross_path}")
 

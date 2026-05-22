@@ -128,7 +128,8 @@ static void ParseWithClauseIntoTags(const string &sql, InsertionOrderPreservingM
 		}
 		search_from = with_pos + 4;
 		// Word-boundary check on both sides.
-		if (with_pos > 0 && (std::isalnum(static_cast<unsigned char>(lower[with_pos - 1])) || lower[with_pos - 1] == '_')) {
+		if (with_pos > 0 &&
+		    (std::isalnum(static_cast<unsigned char>(lower[with_pos - 1])) || lower[with_pos - 1] == '_')) {
 			continue;
 		}
 		idx_t p = with_pos + 4;

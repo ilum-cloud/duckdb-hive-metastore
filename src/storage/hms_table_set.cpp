@@ -50,8 +50,8 @@ void HMSTableSet::LoadEntries(ClientContext &context) {
 
 		// duckdb-avro 1.4 returns INT/BIGINT for Avro date/timestamp-micros logical
 		// types; the catalog type must be downcast to match. See HMSUtils::MapTypeForAvro.
-		bool is_avro = StringUtil::Contains(table.input_format, "Avro") ||
-		               StringUtil::Contains(table.serialization_lib, "Avro");
+		bool is_avro =
+		    StringUtil::Contains(table.input_format, "Avro") || StringUtil::Contains(table.serialization_lib, "Avro");
 
 		// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
 		vector<ColumnDefinition> discovered_columns;
