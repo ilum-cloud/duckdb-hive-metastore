@@ -1,0 +1,95 @@
+# name: test/sql/cache/clear_cache.test
+# description: hms_clear_cache() makes changes made outside the catalog visible without waiting for METADATA_CACHE_TTL
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.duck_cache_cleared;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_cleared (a INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_cleared/');
+
+statement ok
+COPY (SELECT 1 AS a) TO 's3://test-bucket/duck_cache_cleared/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms.sample_db.duck_cache_cleared');
+----
+a
+
+sleep 1 seconds
+
+statement ok
+COPY (SELECT 1 AS a, 'x' AS b) TO 's3://test-bucket/duck_cache_cleared/data.parquet';
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms.sample_db.duck_cache_cleared');
+----
+a
+
+query I
+CALL hms_clear_cache();
+----
+true
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms.sample_db.duck_cache_cleared');
+----
+a,b
+
+# A table dropped outside the catalog stays cached until the cache is cleared
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_cleared;
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_cache_cleared;
+----
+1
+
+query I
+CALL hms_clear_cache();
+----
+true
+
+statement error
+SELECT count(*) FROM hms.sample_db.duck_cache_cleared;
+----
+does not exist
+
+# Clearing inside a transaction also discards what the transaction resolved so far
+statement ok
+BEGIN TRANSACTION;
+
+query I
+SELECT count(*) > 0 FROM pragma_table_info('hms.sample_db.type_test');
+----
+true
+
+query I
+CALL hms_clear_cache();
+----
+true
+
+query I
+SELECT count(*) > 0 FROM pragma_table_info('hms.sample_db.type_test');
+----
+true
+
+statement ok
+COMMIT;

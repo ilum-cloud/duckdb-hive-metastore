@@ -18,31 +18,30 @@ namespace duckdb {
 struct HMSAPITable;
 struct HMSAPIColumnDefinition;
 
-struct HMSTableInfo {
-	HMSTableInfo() {
-		create_info = make_uniq<CreateTableInfo>();
-	}
-	HMSTableInfo(const string &schema, const string &table) {
-		create_info = make_uniq<CreateTableInfo>(string(), schema, table);
-	}
-	HMSTableInfo(const SchemaCatalogEntry &schema, const string &table) {
-		create_info = make_uniq<CreateTableInfo>((SchemaCatalogEntry &)schema, table);
-	}
-
-	const string &GetTableName() const {
-		return create_info->table;
-	}
-
-	unique_ptr<CreateTableInfo> create_info;
-	unique_ptr<HMSAPITable> table_data;
+//! Where the columns of a table entry come from
+enum class HMSSchemaSource : uint8_t {
+	//! Discovered from the data files (Parquet/Delta/Iceberg)
+	FILES,
+	//! The Spark schema stored in the table parameters
+	SPARK_SCHEMA,
+	//! The metastore column definitions
+	HMS_COLUMNS
 };
 
 class HMSTableEntry : public TableCatalogEntry {
 public:
 	HMSTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info);
-	HMSTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, HMSTableInfo &info);
+
+	//! Builds the entry for a table as stored in the metastore. Columns are discovered from the data files for
+	//! Parquet/Delta/Iceberg tables, otherwise taken from the Spark schema or the metastore columns.
+	static unique_ptr<HMSTableEntry> Build(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
+	                                       HMSAPITable table);
+
+	//! Whether both entries have the same column names and types, in the same order
+	bool HasSameColumns(const HMSTableEntry &other) const;
 
 	unique_ptr<HMSAPITable> table_data;
+	HMSSchemaSource schema_source = HMSSchemaSource::HMS_COLUMNS;
 
 	shared_ptr<AttachedDatabase> internal_attached_database;
 

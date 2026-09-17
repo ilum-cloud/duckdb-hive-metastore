@@ -1,0 +1,70 @@
+# name: test/sql/cache/concurrent_single_flight.test
+# description: Concurrent connections resolving the same table, or listing the same schema, load it from the metastore once
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.duck_cache_single_flight;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_single_flight (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_single_flight/');
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_cache_single_flight/data.parquet';
+
+# Only the catalog under test is attached while counting metastore calls
+statement ok
+DETACH hms_writer;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+concurrentloop i 0 8
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_single_flight');
+----
+1
+
+endloop
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_table db=sample_db table=duck_cache_single_flight';
+----
+1
+
+concurrentloop i 0 8
+
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_cache_single_flight';
+----
+1
+
+endloop
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_all_tables db=sample_db';
+----
+1
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DROP TABLE hms.sample_db.duck_cache_single_flight;

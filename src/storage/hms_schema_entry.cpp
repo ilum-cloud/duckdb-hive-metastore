@@ -1,6 +1,9 @@
 #include "storage/hms_schema_entry.hpp"
+#include "storage/hms_catalog.hpp"
 #include "storage/hms_table_entry.hpp"
 #include "storage/hms_transaction.hpp"
+#include "duckdb/catalog/similar_catalog_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
@@ -19,13 +22,6 @@ HMSSchemaEntry::HMSSchemaEntry(Catalog &catalog, CreateSchemaInfo &info)
 }
 
 HMSSchemaEntry::~HMSSchemaEntry() {
-}
-
-HMSTransaction &GetHMSTransaction(CatalogTransaction transaction) {
-	if (!transaction.transaction) {
-		throw InternalException("GetHMSTransaction: No active transaction");
-	}
-	return transaction.transaction->Cast<HMSTransaction>();
 }
 
 optional_ptr<CatalogEntry> HMSSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
@@ -75,9 +71,7 @@ optional_ptr<CatalogEntry> HMSSchemaEntry::CreateView(CatalogTransaction transac
 			throw NotImplementedException("REPLACE ON CONFLICT in CreateView");
 		}
 	}
-	auto &hms_transaction = GetHMSTransaction(transaction);
-	//	hms_transaction.Query(GetHMSCreateView(info));
-	return tables.RefreshTable(transaction.GetContext(), info.view_name);
+	throw NotImplementedException("CREATE VIEW is not supported for Hive Metastore catalogs");
 }
 
 optional_ptr<CatalogEntry> HMSSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
@@ -127,10 +121,9 @@ bool CatalogTypeIsSupported(CatalogType type) {
 
 void HMSSchemaEntry::Scan(ClientContext &context, CatalogType type,
                           const std::function<void(CatalogEntry &)> &callback) {
-	if (!CatalogTypeIsSupported(type)) {
-		return;
-	}
-	if (type == CatalogType::INDEX_ENTRY) {
+	if (type != CatalogType::TABLE_ENTRY) {
+		// HMS tables are only exposed as tables: scanning for views would load the same tables again only to be
+		// filtered out
 		return;
 	}
 	GetCatalogSet(type).Scan(context, callback);
@@ -152,6 +145,26 @@ optional_ptr<CatalogEntry> HMSSchemaEntry::LookupEntry(CatalogTransaction transa
 		return nullptr;
 	}
 	return GetCatalogSet(lookup_info.GetCatalogType()).GetEntry(transaction.GetContext(), lookup_info.GetEntryName());
+}
+
+SimilarCatalogEntry HMSSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                    const EntryLookupInfo &lookup_info) {
+	// DuckDB asks every schema of every attached catalog for similar names whenever a lookup fails. The default
+	// implementation scans the schema, which would load every table in the metastore (including schema discovery on
+	// the object store) just to suggest a name.
+	SimilarCatalogEntry result;
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+		return result;
+	}
+	auto &hms_catalog = ParentCatalog().Cast<HMSCatalog>();
+	for (auto &table_name : hms_catalog.GetTableNamesForSuggestions(transaction.GetContext(), name)) {
+		auto score = StringUtil::SimilarityRating(table_name, lookup_info.GetEntryName());
+		if (score > result.score) {
+			result.score = score;
+			result.name = table_name;
+		}
+	}
+	return result;
 }
 
 HMSCatalogSet &HMSSchemaEntry::GetCatalogSet(CatalogType type) {

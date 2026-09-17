@@ -1,4 +1,5 @@
 #include "hms_api.hpp"
+#include "hms_format_detector.hpp"
 #include "hms_utils.hpp"
 
 #include "storage/hms_catalog.hpp"
@@ -6,199 +7,85 @@
 #include "storage/hms_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/parser/constraints/not_null_constraint.hpp"
-#include "duckdb/parser/constraints/unique_constraint.hpp"
-#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
-#include "duckdb/catalog/dependency_list.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/parser/constraints/list.hpp"
 #include "storage/hms_schema_entry.hpp"
-#include "duckdb/parser/parser.hpp"
-#include "duckdb/common/types.hpp"
 
 namespace duckdb {
 
-HMSTableSet::HMSTableSet(HMSSchemaEntry &schema) : HMSInSchemaSet(schema) {
+HMSTableSet::HMSTableSet(HMSSchemaEntry &schema) : HMSCatalogSet(schema.ParentCatalog()), schema(schema) {
 }
 
-static ColumnDefinition CreateColumnDefinition(ClientContext &context, HMSAPIColumnDefinition &coldef) {
-	// HMS types (e.g. "int", "string") are compatible with HMSUtils::TypeToLogicalType parser
-	return {coldef.name, HMSUtils::TypeToLogicalType(context, coldef.type)};
+HMSLoadResult HMSTableSet::LoadEntry(ClientContext &context, const string &name, optional_ptr<CatalogEntry> cached) {
+	auto table = HMSAPI::GetTable(context, schema.name, name, GetHMSCatalog().endpoint);
+	if (!table) {
+		return HMSLoadResult::Missing();
+	}
+	return Revalidate(context, std::move(*table), cached);
 }
 
-void HMSTableSet::LoadEntries(ClientContext &context) {
-	auto &transaction = HMSTransaction::Get(context, catalog);
+vector<string> HMSTableSet::ListEntryNames(ClientContext &context) {
+	return HMSAPI::GetTableNames(context, schema.name, GetHMSCatalog().endpoint);
+}
 
-	auto &hms_catalog = catalog.Cast<HMSCatalog>();
-
-	// TODO: handle out-of-order columns using position property
-
-	auto tables = HMSAPI::GetTablesInSchema(context, schema.name, hms_catalog.endpoint);
-
+void HMSTableSet::LoadEntries(ClientContext &context, const vector<pair<string, optional_ptr<CatalogEntry>>> &requests,
+                              const std::function<void(const string &name, HMSLoadResult result)> &on_loaded) {
+	vector<string> names;
+	case_insensitive_map_t<optional_ptr<CatalogEntry>> cached_entries;
+	for (auto &request : requests) {
+		names.push_back(request.first);
+		cached_entries[request.first] = request.second;
+	}
+	auto tables = HMSAPI::GetTables(context, schema.name, names, GetHMSCatalog().endpoint);
 	for (auto &table : tables) {
-		// Validate that the table's database matches our schema name
-		// This should always hold if the HMS API is working correctly
-		if (schema.name != table.db_name) {
-			// Log but continue - this is a data inconsistency issue, not a crash-worthy error
-			// The HMS API returned a table for the wrong database
+		if (context.interrupted) {
+			throw InterruptException();
+		}
+		auto cached = cached_entries.find(table.name);
+		if (cached == cached_entries.end() || !StringUtil::CIEquals(table.db_name, schema.name)) {
+			// Not requested, or returned for another database
 			continue;
 		}
-		CreateTableInfo info;
-		info.table = table.name;
-
-		// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
-		vector<ColumnDefinition> discovered_columns;
-		if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, table, discovered_columns)) {
-			// Use the discovered schema from Parquet/Delta/Iceberg
-			for (auto &col : discovered_columns) {
-				info.columns.AddColumn(std::move(col));
-			}
-		} else {
-			// Try to parse Spark schema for other tables
-			vector<HMSAPIColumnDefinition> spark_columns;
-			if (HMSUtils::ParseSparkSchema(table.parameters, spark_columns)) {
-				for (auto &col : spark_columns) {
-					// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
-					auto logical_type = TransformStringToLogicalType(col.type, context);
-					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
-				}
-			} else {
-				// Fallback to standard HMS columns
-				for (auto &col : table.columns) {
-					auto logical_type = HMSUtils::TypeToLogicalType(context, col.type);
-					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
-				}
-			}
-		}
-
-		// Add HMS metadata as tags for inter-extension communication (e.g., with OpenLineage)
-		// This allows other extensions to access HMS metadata without code dependencies
-		info.tags["hms_storage_location"] = table.storage_location;
-		info.tags["hms_table_type"] = table.table_type;
-		info.tags["hms_input_format"] = table.input_format;
-		info.tags["hms_output_format"] = table.output_format;
-		info.tags["hms_serialization_lib"] = table.serialization_lib;
-
-		auto table_entry = make_uniq<HMSTableEntry>(catalog, schema, info);
-		table_entry->table_data = make_uniq<HMSAPITable>(table);
-		CreateEntry(std::move(table_entry));
+		on_loaded(cached->first, Revalidate(context, std::move(table), cached->second));
 	}
 }
 
-optional_ptr<CatalogEntry> HMSTableSet::RefreshTable(ClientContext &context, const string &table_name) {
-	auto table_info = GetTableInfo(context, schema, table_name);
-	if (!table_info) {
-		throw IOException("Failed to fetch table info for '%s.%s': table info is null", schema.name.c_str(),
-		                  table_name.c_str());
+HMSLoadResult HMSTableSet::Revalidate(ClientContext &context, HMSAPITable table, optional_ptr<CatalogEntry> cached) {
+	optional_ptr<HMSTableEntry> cached_table;
+	if (cached) {
+		cached_table = &cached->Cast<HMSTableEntry>();
 	}
-	auto table_entry = make_uniq<HMSTableEntry>(catalog, schema, *table_info);
-	auto table_ptr = table_entry.get();
-	CreateEntry(std::move(table_entry));
-	return table_ptr;
-}
-
-unique_ptr<HMSTableInfo> HMSTableSet::GetTableInfo(ClientContext &context, HMSSchemaEntry &schema,
-                                                   const string &table_name) {
-	auto &hms_catalog = catalog.Cast<HMSCatalog>();
-	auto client = HMSAPI::GetClient(hms_catalog.endpoint);
-
-	Apache::Hadoop::Hive::Table ht;
+	bool same_definition =
+	    cached_table && cached_table->table_data && cached_table->table_data->HasSameDefinition(table);
+	auto format = hms::FormatDetector::Detect(table);
+	bool schema_from_files = format.IsParquet() || format.IsDelta() || format.IsIceberg();
+	if (same_definition && !schema_from_files) {
+		// The columns come from the metastore definition, which did not change
+		return HMSLoadResult::KeepCached();
+	}
+	// Discover the schema again: files can change without the metastore definition changing
+	unique_ptr<HMSTableEntry> rebuilt;
 	try {
-		ht = client->GetTable(schema.name, table_name);
-	} catch (const std::exception &ex) {
-		throw IOException("Failed to fetch table info for '%s.%s': %s", schema.name.c_str(), table_name.c_str(),
-		                  ex.what());
-	}
-
-	auto result = make_uniq<HMSTableInfo>(schema, table_name);
-	HMSAPITable t;
-	t.name = ht.tableName;
-	t.db_name = ht.dbName;
-	t.table_type = ht.tableType;
-	t.storage_location = ht.sd.location;
-	t.input_format = ht.sd.inputFormat;
-	t.output_format = ht.sd.outputFormat;
-	t.serialization_lib = ht.sd.serdeInfo.serializationLib;
-	t.serde_parameters = ht.sd.serdeInfo.parameters;
-	t.parameters = ht.parameters;
-
-	for (const auto &col : ht.sd.cols) {
-		HMSAPIColumnDefinition c;
-		c.name = col.name;
-		c.type = col.type;
-		c.comment = col.comment;
-		t.columns.push_back(c);
-	}
-
-	for (const auto &pk : ht.partitionKeys) {
-		HMSAPIColumnDefinition c;
-		c.name = pk.name;
-		c.type = pk.type;
-		c.comment = pk.comment;
-		t.partition_keys.push_back(c);
-	}
-
-	result->create_info->table = table_name;
-	result->create_info->columns = CreateTableInfo().columns; // initialize empty then fill
-
-	result->create_info->sql = "";
-
-	// Replace tags by constructing a fresh map from parameters
-	result->create_info->tags = InsertionOrderPreservingMap<string>();
-	for (auto &kv : t.parameters) {
-		result->create_info->tags[kv.first] = kv.second;
-	}
-
-	result->create_info->comment = Value();
-
-	// attach table_data BEFORE schema resolution (needed for format detection)
-	result->table_data = make_uniq<HMSAPITable>(std::move(t));
-
-	// Resolve schema using the same logic as LoadEntries.
-	// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
-	vector<ColumnDefinition> discovered_columns;
-	if (HMSTableEntry::DiscoverDynamicSchema(context, catalog, schema, *result->table_data, discovered_columns)) {
-		// Use the discovered schema from Parquet/Delta/Iceberg
-		result->create_info->columns = CreateTableInfo().columns; // clear and re-fill
-		for (auto &col : discovered_columns) {
-			result->create_info->columns.AddColumn(std::move(col));
+		rebuilt = HMSTableEntry::Build(context, catalog, schema, std::move(table));
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
 		}
-	} else {
-		// Try to parse Spark schema for other tables
-		vector<HMSAPIColumnDefinition> spark_columns;
-		if (HMSUtils::ParseSparkSchema(result->table_data->parameters, spark_columns)) {
-			result->create_info->columns = CreateTableInfo().columns; // clear and re-fill
-			for (auto &col : spark_columns) {
-				// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
-				auto logical_type = TransformStringToLogicalType(col.type, context);
-				result->create_info->columns.AddColumn(ColumnDefinition(col.name, logical_type));
-			}
-		} else {
-			// Fallback to standard HMS columns
-			result->create_info->columns = CreateTableInfo().columns; // clear and re-fill
-			for (auto &c : result->table_data->columns) {
-				auto logical_type = HMSUtils::TypeToLogicalType(context, c.type);
-				result->create_info->columns.AddColumn(ColumnDefinition(c.name, logical_type));
-			}
+		return HMSLoadResult::Failed(std::move(error));
+	}
+	if (same_definition) {
+		if (rebuilt->HasSameColumns(*cached_table)) {
+			return HMSLoadResult::KeepCached();
+		}
+		if (cached_table->schema_source == HMSSchemaSource::FILES && rebuilt->schema_source != HMSSchemaSource::FILES) {
+			// Discovery failed this time (e.g. the object store was unreachable) while the definition is unchanged:
+			// keep the columns discovered earlier
+			return HMSLoadResult::KeepCached();
 		}
 	}
-
-	// Add HMS metadata as tags for inter-extension communication (e.g., with OpenLineage)
-	// This allows other extensions to access HMS metadata without code dependencies
-	result->create_info->tags["hms_storage_location"] = result->table_data->storage_location;
-	result->create_info->tags["hms_table_type"] = result->table_data->table_type;
-	result->create_info->tags["hms_input_format"] = result->table_data->input_format;
-	result->create_info->tags["hms_output_format"] = result->table_data->output_format;
-	result->create_info->tags["hms_serialization_lib"] = result->table_data->serialization_lib;
-
-	// ensure create_info has columns
-	result->create_info->table = table_name;
-
-	// Return the HMSTableInfo containing create_info and table_data
-
-	return result;
+	return HMSLoadResult::NewEntry(std::move(rebuilt));
 }
 
 optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
@@ -227,7 +114,7 @@ optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, Boun
 	}
 
 	// Require either an explicit 'location' tag or a warehouse_location configured on the HMS catalog
-	auto &hms_catalog = catalog.Cast<HMSCatalog>();
+	auto &hms_catalog = GetHMSCatalog();
 	auto loc_tag_it = base.tags.find("location");
 	if (loc_tag_it == base.tags.end() || loc_tag_it->second.empty()) {
 		if (hms_catalog.warehouse_location.empty()) {
@@ -242,38 +129,22 @@ optional_ptr<CatalogEntry> HMSTableSet::CreateTable(ClientContext &context, Boun
 	// Call HMS API to create
 	HMSAPI::CreateTable(context, thrift_table, hms_catalog.endpoint);
 
-	// Fetch table info first to ensure we have complete data before creating entry
-	// This avoids creating an incomplete entry if GetTableInfo fails
-	auto table_info = GetTableInfo(context, schema, base.table);
-	if (!table_info) {
+	// Register the table as the metastore stored it, rather than with the user-declared columns, so subsequent
+	// queries see exactly what a re-attach would resolve
+	auto table = HMSAPI::GetTable(context, schema.name, base.table, hms_catalog.endpoint);
+	if (!table) {
 		throw IOException("Failed to fetch table info after creating table '%s'", base.table);
 	}
-
-	// Register the new table entry in the catalog. Reuse the columns assembled by GetTableInfo
-	// rather than the user-declared columns so subsequent SELECTs see exactly what a re-attach
-	// would resolve from the HMS-stored schema.
-	auto table_entry = make_uniq<HMSTableEntry>(catalog, schema, *table_info);
-	if (table_info->table_data) {
-		table_entry->table_data = make_uniq<HMSAPITable>(*table_info->table_data);
-	}
-
-	auto ptr = table_entry.get();
-	CreateEntry(std::move(table_entry));
-	return ptr;
+	return PutEntry(context, HMSTableEntry::Build(context, catalog, schema, std::move(*table)));
 }
 
 void HMSTableSet::DropEntry(ClientContext &context, DropInfo &info) {
-	auto &hms_catalog = catalog.Cast<HMSCatalog>();
-	bool dropped = HMSAPI::DropTable(context, schema.name, info.name, hms_catalog.endpoint);
-	if (!dropped) {
-		// Table did not exist in HMS. Without IF EXISTS, surface the error. With IF EXISTS,
-		// fall through so any stale local cache entry (e.g. dropped by another process after
-		// LoadEntries cached it) is also pruned.
-		if (info.if_not_found != OnEntryNotFound::RETURN_NULL) {
-			throw CatalogException("Table '%s.%s' does not exist", schema.name, info.name);
-		}
+	bool dropped = HMSAPI::DropTable(context, schema.name, info.name, GetHMSCatalog().endpoint);
+	// The table is gone from the metastore either way (e.g. dropped by another process after it was cached)
+	EvictEntry(context, info.name);
+	if (!dropped && info.if_not_found != OnEntryNotFound::RETURN_NULL) {
+		throw CatalogException("Table '%s.%s' does not exist", schema.name, info.name);
 	}
-	EraseEntryInternal(info.name);
 }
 
 void HMSTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {

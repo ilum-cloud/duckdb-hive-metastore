@@ -42,6 +42,8 @@ public:
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
+	//! Finds the closest table name for "did you mean" errors without loading any table
+	SimilarCatalogEntry GetSimilarEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 
 private:
 	HMSCatalogSet &GetCatalogSet(CatalogType type);

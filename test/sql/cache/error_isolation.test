@@ -1,0 +1,64 @@
+# name: test/sql/cache/error_isolation.test
+# description: A table whose metadata cannot be mapped fails with its own error, and does not hide the other tables of its schema
+# group: [cache]
+
+# Requires test/sql/cache/post_seed_bad_type_fixture.sh to have created sample_db.duck_fixture_bad_type,
+# a text table with a uniontype column (invoked by the test-fixture-bad-type Makefile target).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement error
+SELECT * FROM hms.sample_db.duck_fixture_bad_type;
+----
+Failed to load table "sample_db.duck_fixture_bad_type" from Hive Metastore: Unsupported or unrecognized Hive type: 'uniontype<int,string>'
+
+query I
+SELECT count(*) > 0 FROM hms.sample_db.type_test;
+----
+true
+
+query I
+SELECT count(*) > 0 FROM pragma_table_info('hms.sample_db.cross_engine_parquet');
+----
+true
+
+# Listing the schema first: the broken table is skipped with a warning, every other table is listed
+statement ok
+DETACH hms;
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+query I
+SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables
+WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name IN ('customers', 'duck_fixture_bad_type', 'type_test');
+----
+customers,type_test
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs WHERE log_level = 'WARNING' AND message LIKE '%duck_fixture_bad_type%uniontype%';
+----
+true
+
+statement error
+DESCRIBE hms.sample_db.duck_fixture_bad_type;
+----
+uniontype<int,string>
+
+statement ok
+CALL disable_logging();

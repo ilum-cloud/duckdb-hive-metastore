@@ -82,18 +82,30 @@ Apache::Hadoop::Hive::Database HMSClient::GetDatabase(const string &db_name) {
 	return db;
 }
 
-Apache::Hadoop::Hive::Table HMSClient::GetTable(const string &db_name, const string &table_name) {
+bool HMSClient::TryGetTable(const string &db_name, const string &table_name, Apache::Hadoop::Hive::Table &result) {
 	if (!connected)
 		Open();
-	Apache::Hadoop::Hive::Table table;
 	try {
-		client->get_table(table, db_name, table_name);
-	} catch (Apache::Hadoop::Hive::NoSuchObjectException &e) {
-		throw IOException("Table '%s.%s' not found: %s", db_name, table_name, e.message);
+		client->get_table(result, db_name, table_name);
+		return true;
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		return false;
 	} catch (apache::thrift::TException &tx) {
 		throw IOException("Failed to get table '%s.%s': %s", db_name, table_name, tx.what());
 	}
-	return table;
+}
+
+vector<Apache::Hadoop::Hive::TableMeta> HMSClient::GetTableMeta(const string &db_patterns,
+                                                                const string &table_patterns) {
+	if (!connected)
+		Open();
+	vector<Apache::Hadoop::Hive::TableMeta> tables;
+	try {
+		client->get_table_meta(tables, db_patterns, table_patterns, vector<string>());
+	} catch (apache::thrift::TException &tx) {
+		throw IOException("Failed to list tables matching '%s.%s': %s", db_patterns, table_patterns, tx.what());
+	}
+	return tables;
 }
 
 vector<Apache::Hadoop::Hive::Table> HMSClient::GetTableObjects(const string &db_name,
