@@ -32,10 +32,11 @@ namespace duckdb {
 
 HMSCatalog::HMSCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
                        string endpoint_p, const string &default_schema, const string &warehouse_location,
-                       string catalog_name_p)
+                       string catalog_name_p, idx_t metadata_cache_ttl_seconds)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
       endpoint(std::move(endpoint_p)), warehouse_location(warehouse_location), schemas(*this),
-      default_schema(default_schema), catalog_name(std::move(catalog_name_p)) {
+      default_schema(default_schema), catalog_name(std::move(catalog_name_p)),
+      metadata_cache_ttl(std::chrono::seconds(metadata_cache_ttl_seconds)), cache_generation(0) {
 }
 
 HMSCatalog::~HMSCatalog() = default;
@@ -107,7 +108,52 @@ DatabaseSize HMSCatalog::GetDatabaseSize(ClientContext &context) {
 }
 
 void HMSCatalog::ClearCache() {
-	schemas.ClearEntries();
+	// Catalog sets pick up the new generation on their next access. Nothing is freed: queries that are still running
+	// may reference the entries loaded so far.
+	cache_generation++;
+}
+
+vector<string> HMSCatalog::GetTableNamesForSuggestions(ClientContext &context, const string &schema_name) {
+	// Suggestions are best effort. A failed lookup asks up to catalog_error_max_schemas schemas, so keep the names for
+	// at least a second: one metastore call serves all of them, even with METADATA_CACHE_TTL 0.
+	auto max_age = MaxValue<std::chrono::steady_clock::duration>(metadata_cache_ttl, std::chrono::seconds(1));
+	{
+		lock_guard<mutex> guard(suggestion_lock);
+		if (suggestion_names_loaded && suggestion_names_generation == GetCacheGeneration() &&
+		    std::chrono::steady_clock::now() - suggestion_names_loaded_at < max_age) {
+			auto names = suggestion_names.find(schema_name);
+			return names == suggestion_names.end() ? vector<string>() : names->second;
+		}
+	}
+	auto generation = GetCacheGeneration();
+	case_insensitive_map_t<vector<string>> names;
+	try {
+		names = HMSAPI::GetAllTableNames(context, endpoint);
+	} catch (std::exception &ex) {
+		if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		// e.g. a metastore without get_table_meta: list only this schema
+		try {
+			return HMSAPI::GetTableNames(context, schema_name, endpoint);
+		} catch (std::exception &list_ex) {
+			if (ErrorData(list_ex).Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			return vector<string>();
+		}
+	}
+	vector<string> result;
+	auto schema_names = names.find(schema_name);
+	if (schema_names != names.end()) {
+		result = schema_names->second;
+	}
+	lock_guard<mutex> guard(suggestion_lock);
+	suggestion_names = std::move(names);
+	suggestion_names_loaded = true;
+	suggestion_names_generation = generation;
+	suggestion_names_loaded_at = std::chrono::steady_clock::now();
+	return result;
 }
 
 ErrorData HMSCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {

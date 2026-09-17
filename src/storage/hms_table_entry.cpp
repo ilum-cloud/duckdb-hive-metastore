@@ -42,14 +42,78 @@ HMSTableEntry::HMSTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, Creat
 	}
 }
 
-HMSTableEntry::HMSTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, HMSTableInfo &info)
-    : TableCatalogEntry(catalog, schema, *info.create_info) {
-	this->internal = false;
-	// Copy tags from CreateTableInfo to CatalogEntry
-	// This ensures inter-extension communication (e.g., with OpenLineage) works
-	for (auto &tag : info.create_info->tags) {
-		this->tags[tag.first] = tag.second;
+unique_ptr<HMSTableEntry> HMSTableEntry::Build(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
+                                               HMSAPITable table) {
+	auto table_name = table.name;
+	try {
+		CreateTableInfo info;
+		info.table = table_name;
+		auto schema_source = HMSSchemaSource::HMS_COLUMNS;
+
+		// Try to discover dynamic schema for Parquet/Delta/Iceberg tables
+		vector<ColumnDefinition> discovered_columns;
+		if (DiscoverDynamicSchema(context, catalog, schema, table, discovered_columns)) {
+			// Use the discovered schema from Parquet/Delta/Iceberg
+			schema_source = HMSSchemaSource::FILES;
+			for (auto &col : discovered_columns) {
+				info.columns.AddColumn(std::move(col));
+			}
+		} else {
+			// Try to parse Spark schema for other tables
+			vector<HMSAPIColumnDefinition> spark_columns;
+			if (HMSUtils::ParseSparkSchema(table.parameters, spark_columns)) {
+				schema_source = HMSSchemaSource::SPARK_SCHEMA;
+				for (auto &col : spark_columns) {
+					// col.type is already a DuckDB LogicalType string (e.g. "INTEGER", "STRUCT(...)")
+					auto logical_type = TransformStringToLogicalType(col.type, context);
+					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
+				}
+			} else {
+				// Fallback to standard HMS columns
+				for (auto &col : table.columns) {
+					auto logical_type = HMSUtils::TypeToLogicalType(context, col.type);
+					info.columns.AddColumn(ColumnDefinition(col.name, logical_type));
+				}
+			}
+		}
+
+		// Add HMS metadata as tags for inter-extension communication (e.g., with OpenLineage)
+		// This allows other extensions to access HMS metadata without code dependencies
+		info.tags["hms_storage_location"] = table.storage_location;
+		info.tags["hms_table_type"] = table.table_type;
+		info.tags["hms_input_format"] = table.input_format;
+		info.tags["hms_output_format"] = table.output_format;
+		info.tags["hms_serialization_lib"] = table.serialization_lib;
+
+		auto entry = make_uniq<HMSTableEntry>(catalog, schema, info);
+		entry->internal = schema.internal;
+		entry->schema_source = schema_source;
+		entry->table_data = make_uniq<HMSAPITable>(std::move(table));
+		return entry;
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		error.Throw(
+		    StringUtil::Format("Failed to load table \"%s.%s\" from Hive Metastore: ", schema.name, table_name));
 	}
+}
+
+bool HMSTableEntry::HasSameColumns(const HMSTableEntry &other) const {
+	auto &columns = GetColumns();
+	auto &other_columns = other.GetColumns();
+	if (columns.LogicalColumnCount() != other_columns.LogicalColumnCount()) {
+		return false;
+	}
+	for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
+		auto &column = columns.GetColumn(LogicalIndex(i));
+		auto &other_column = other_columns.GetColumn(LogicalIndex(i));
+		if (column.Name() != other_column.Name() || column.Type() != other_column.Type()) {
+			return false;
+		}
+	}
+	return true;
 }
 
 unique_ptr<BaseStatistics> HMSTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -146,6 +210,10 @@ bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catal
 
 		return true;
 	} catch (const std::exception &ex) {
+		// An interrupted query must stop, not fall back to the HMS schema
+		if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
 		// Binding failed - this is expected when the extension is not loaded
 		// or the table path is invalid. Return false to fall back to HMS schema.
 		// Note: We catch by const reference to avoid slicing and to potentially

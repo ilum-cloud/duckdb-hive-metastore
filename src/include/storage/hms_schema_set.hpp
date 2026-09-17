@@ -23,7 +23,12 @@ public:
 	optional_ptr<CatalogEntry> CreateSchema(ClientContext &context, CreateSchemaInfo &info);
 
 protected:
-	void LoadEntries(ClientContext &context) override;
+	bool SupportsPointLookup() const override {
+		return false;
+	}
+	vector<string> ListEntryNames(ClientContext &context) override;
+	void LoadEntries(ClientContext &context, const vector<pair<string, optional_ptr<CatalogEntry>>> &requests,
+	                 const std::function<void(const string &name, HMSLoadResult result)> &on_loaded) override;
 };
 
 } // namespace duckdb

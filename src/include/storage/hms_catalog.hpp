@@ -10,10 +10,14 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "storage/hms_schema_set.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "hms_client.hpp"
+
+#include <chrono>
 
 namespace duckdb {
 class HMSSchemaEntry;
@@ -27,9 +31,13 @@ public:
 
 class HMSCatalog : public Catalog {
 public:
+	//! How long metadata loaded from the metastore is used before it is revalidated (ATTACH option METADATA_CACHE_TTL)
+	static constexpr idx_t DEFAULT_METADATA_CACHE_TTL_SECONDS = 5;
+
 	explicit HMSCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
 	                    string endpoint, const string &default_schema, const string &warehouse_location = "",
-	                    string catalog_name = "hive_metastore");
+	                    string catalog_name = "hive_metastore",
+	                    idx_t metadata_cache_ttl_seconds = DEFAULT_METADATA_CACHE_TTL_SECONDS);
 	~HMSCatalog() override;
 
 	string internal_name;
@@ -73,6 +81,16 @@ public:
 	bool InMemory() override;
 	string GetDBPath() override;
 
+	std::chrono::steady_clock::duration GetMetadataCacheTTL() const {
+		return metadata_cache_ttl;
+	}
+	//! Incremented by ClearCache; catalog sets compare it to invalidate what they cached earlier
+	idx_t GetCacheGeneration() const {
+		return cache_generation.load();
+	}
+	//! Names of the tables in a schema, for "did you mean" suggestions (no table is loaded)
+	vector<string> GetTableNamesForSuggestions(ClientContext &context, const string &schema_name);
+	//! Marks all cached metadata stale, so the next lookups revalidate against the metastore
 	void ClearCache();
 
 private:
@@ -81,6 +99,14 @@ private:
 private:
 	HMSSchemaSet schemas;
 	string default_schema;
+	std::chrono::steady_clock::duration metadata_cache_ttl;
+	atomic<idx_t> cache_generation;
+
+	mutex suggestion_lock;
+	case_insensitive_map_t<vector<string>> suggestion_names;
+	bool suggestion_names_loaded = false;
+	idx_t suggestion_names_generation = 0;
+	std::chrono::steady_clock::time_point suggestion_names_loaded_at;
 };
 
 } // namespace duckdb

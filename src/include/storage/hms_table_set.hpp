@@ -13,10 +13,9 @@
 
 namespace duckdb {
 struct CreateTableInfo;
-class UCResult;
 class HMSSchemaEntry;
 
-class HMSTableSet : public HMSInSchemaSet {
+class HMSTableSet : public HMSCatalogSet {
 public:
 	explicit HMSTableSet(HMSSchemaEntry &schema);
 	~HMSTableSet() override = default;
@@ -24,22 +23,29 @@ public:
 public:
 	optional_ptr<CatalogEntry> CreateTable(ClientContext &context, BoundCreateTableInfo &info);
 
-	unique_ptr<HMSTableInfo> GetTableInfo(ClientContext &context, HMSSchemaEntry &schema, const string &table_name);
-	optional_ptr<CatalogEntry> RefreshTable(ClientContext &context, const string &table_name);
-
 	void AlterTable(ClientContext &context, AlterTableInfo &info);
 
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 
 protected:
-	void LoadEntries(ClientContext &context) override;
+	bool SupportsPointLookup() const override {
+		return true;
+	}
+	HMSLoadResult LoadEntry(ClientContext &context, const string &name, optional_ptr<CatalogEntry> cached) override;
+	vector<string> ListEntryNames(ClientContext &context) override;
+	void LoadEntries(ClientContext &context, const vector<pair<string, optional_ptr<CatalogEntry>>> &requests,
+	                 const std::function<void(const string &name, HMSLoadResult result)> &on_loaded) override;
 
 	void AlterTable(ClientContext &context, RenameTableInfo &info);
 	void AlterTable(ClientContext &context, RenameColumnInfo &info);
 	void AlterTable(ClientContext &context, AddColumnInfo &info);
 	void AlterTable(ClientContext &context, RemoveColumnInfo &info);
 
-	static void AddColumn(ClientContext &context, UCResult &result, HMSTableInfo &table_info, idx_t column_offset = 0);
+private:
+	//! Decides whether the table as currently stored in the metastore replaces the cached entry
+	HMSLoadResult Revalidate(ClientContext &context, HMSAPITable table, optional_ptr<CatalogEntry> cached);
+
+	HMSSchemaEntry &schema;
 };
 
 } // namespace duckdb
