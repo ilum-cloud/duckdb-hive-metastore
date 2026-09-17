@@ -12,7 +12,7 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Hive Metastore integration test targets
-.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss test-schema-drift spark-verify-writes test-spark-verify test-cross-engine-scenarios test-cross-engine-scenarios-run
+.PHONY: test-all test-env-start test-env-stop test-run test-mutate-oss test-schema-drift test-fixture-bad-type spark-verify-writes test-spark-verify test-cross-engine-scenarios test-cross-engine-scenarios-run
 
 # Main target: build, start env, run tests, stop env
 test-all: release
@@ -20,23 +20,26 @@ test-all: release
 	@echo "Running Hive Metastore Integration Tests"
 	@echo "========================================"
 	@echo ""
-	@echo "[1/6] Cleaning up any old containers..."
+	@echo "[1/7] Cleaning up any old containers..."
 	cd test && docker compose down -v --remove-orphans 2>/dev/null || true
 	@echo ""
-	@echo "[2/6] Starting Hive Metastore test environment..."
+	@echo "[2/7] Starting Hive Metastore test environment..."
 	cd test && docker compose up -d
 	@echo ""
-	@echo "[3/6] Waiting for Hive Metastore to be ready and seeded..."
+	@echo "[3/7] Waiting for Hive Metastore to be ready and seeded..."
 	cd test && docker compose wait spark-seeder
 	@echo "✓ Hive Metastore is ready and seeded with data"
 	@echo ""
-	@echo "[4/6] Applying oss:// metastore mutation for scheme-rewrite test..."
+	@echo "[4/7] Applying oss:// metastore mutation for scheme-rewrite test..."
 	bash test/sql/oss/post_seed_oss_mutation.sh
 	@echo ""
-	@echo "[5/6] Applying schema-drift mutation for schema_drift test..."
+	@echo "[5/7] Applying schema-drift mutation for schema_drift test..."
 	bash test/sql/oss/post_seed_schema_drift.sh
 	@echo ""
-	@echo "[6/6] Running tests..."
+	@echo "[6/7] Creating the unmappable-type table for the error_isolation test..."
+	bash test/sql/cache/post_seed_bad_type_fixture.sh
+	@echo ""
+	@echo "[7/7] Running tests..."
 	HMS_TEST_AVAILABLE=1 ./build/release/test/unittest 'test*'
 	@echo ""
 	@echo "========================================"
@@ -73,6 +76,12 @@ test-mutate-oss:
 test-schema-drift:
 	bash test/sql/oss/post_seed_schema_drift.sh
 
+# Create sample_db.duck_fixture_bad_type, a table with a column type the extension
+# cannot map (idempotent). Run after test-env-start; required for
+# test/sql/cache/error_isolation.test.
+test-fixture-bad-type:
+	bash test/sql/cache/post_seed_bad_type_fixture.sh
+
 # Cross-engine verification: Spark reads back the tables DuckDB wrote.
 # Requires the docker-compose env to be running AND the DuckDB tests to have
 # already populated the duck_* tables.
@@ -102,6 +111,7 @@ test-spark-verify: release
 	@echo "[4/8] Applying post-seed HMS mutations..."
 	bash test/sql/oss/post_seed_oss_mutation.sh
 	bash test/sql/oss/post_seed_schema_drift.sh
+	bash test/sql/cache/post_seed_bad_type_fixture.sh
 	@echo ""
 	@echo "[5/8] Running DuckDB tests (populates duck_* tables, incl. Avro CREATE)..."
 	HMS_TEST_AVAILABLE=1 REMOTE_EXTENSIONS=1 ./build/release/test/unittest 'test*'

@@ -1,0 +1,101 @@
+# name: test/sql/cache/lookup_single_table.test
+# description: Looking up one HMS table loads only that table: a single get_table call and schema discovery of its own files
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# A separate catalog instance creates the tables, so the catalog under test starts with an empty cache
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+foreach table duck_cache_lk_alpha duck_cache_lk_beta duck_cache_lk_gamma
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.${table};
+
+statement ok
+CREATE TABLE hms_writer.sample_db.${table} (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/${table}/');
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/${table}/data.parquet';
+
+endloop
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_lk_alpha');
+----
+1
+
+# Only the files of the requested table were read
+query II
+SELECT count(*) FILTER (WHERE request.url LIKE '%duck\_cache\_lk\_alpha%' ESCAPE '\') > 0,
+       count(*) FILTER (WHERE request.url NOT LIKE '%duck\_cache\_lk\_alpha%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP');
+----
+true	0
+
+# One get_table call, no listing of the schema
+query III
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_table db=sample_db table=duck_cache_lk_alpha'),
+       count(*) FILTER (WHERE message LIKE 'hive\_metastore rpc=get\_all\_tables%' ESCAPE '\'),
+       count(*) FILTER (WHERE message LIKE 'hive\_metastore rpc=get\_table\_objects\_by\_name%' ESCAPE '\')
+FROM duckdb_logs;
+----
+1	0	0
+
+# Looking the table up again within the TTL uses the cache
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_lk_alpha');
+----
+1
+
+query II
+SELECT (SELECT count(*) FROM duckdb_logs_parsed('HTTP')),
+       (SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive\_metastore rpc=%' ESCAPE '\');
+----
+0	0
+
+# A table that does not exist costs one get_table call
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM hms.sample_db.duck_cache_lk_missing;
+----
+does not exist
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_table db=sample_db table=duck_cache_lk_missing';
+----
+1
+
+statement ok
+CALL disable_logging();
+
+foreach table duck_cache_lk_alpha duck_cache_lk_beta duck_cache_lk_gamma
+
+statement ok
+DROP TABLE hms_writer.sample_db.${table};
+
+endloop

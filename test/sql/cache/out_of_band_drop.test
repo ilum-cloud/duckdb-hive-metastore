@@ -1,0 +1,68 @@
+# name: test/sql/cache/out_of_band_drop.test
+# description: A table dropped outside this catalog disappears once METADATA_CACHE_TTL has passed, and reappears when it is recreated
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.duck_cache_dropped;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_dropped (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_dropped/');
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_cache_dropped/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 1);
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_cache_dropped;
+----
+1
+
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_cache_dropped';
+----
+1
+
+# Dropping the table in the metastore keeps its files (DROP never deletes data)
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_dropped;
+
+sleep 2 seconds
+
+statement error
+SELECT count(*) FROM hms.sample_db.duck_cache_dropped;
+----
+does not exist
+
+query I
+SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'hms' AND table_schema = 'sample_db' AND table_name = 'duck_cache_dropped';
+----
+0
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_dropped (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_dropped/');
+
+sleep 2 seconds
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_cache_dropped;
+----
+1
+
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_dropped;

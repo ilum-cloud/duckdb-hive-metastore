@@ -1,0 +1,75 @@
+# name: test/sql/cache/transaction_snapshot.test
+# description: A transaction keeps seeing the metadata it resolved, even when another connection drops the table meanwhile
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# TTL 0: every new transaction revalidates what it uses
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 0);
+
+statement ok
+DROP TABLE IF EXISTS hms.sample_db.duck_cache_snapshot;
+
+statement ok
+CREATE TABLE hms.sample_db.duck_cache_snapshot (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_snapshot/');
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_cache_snapshot/data.parquet';
+
+statement ok con1
+BEGIN TRANSACTION;
+
+query I con1
+SELECT count(*) FROM hms.sample_db.duck_cache_snapshot;
+----
+1
+
+statement ok con2
+DROP TABLE hms.sample_db.duck_cache_snapshot;
+
+query I con1
+SELECT count(*) FROM hms.sample_db.duck_cache_snapshot;
+----
+1
+
+statement ok con1
+COMMIT;
+
+statement error con1
+SELECT count(*) FROM hms.sample_db.duck_cache_snapshot;
+----
+does not exist
+
+# A table created in a transaction is usable in the same transaction
+statement ok
+DROP TABLE IF EXISTS hms.sample_db.duck_cache_in_transaction;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+CREATE TABLE hms.sample_db.duck_cache_in_transaction (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_in_transaction/');
+
+statement ok
+INSERT INTO hms.sample_db.duck_cache_in_transaction VALUES (1), (2);
+
+query I
+SELECT count(*) >= 2 FROM hms.sample_db.duck_cache_in_transaction;
+----
+true
+
+statement ok
+COMMIT;
+
+statement ok
+DROP TABLE hms.sample_db.duck_cache_in_transaction;

@@ -1,0 +1,100 @@
+# name: test/sql/cache/stale_schema_refresh.test
+# description: After METADATA_CACHE_TTL, a lookup picks up schema changes made outside this catalog, both in data files and in the metastore
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.duck_cache_evolve;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_evolve (a INTEGER) WITH (format='parquet', location='s3a://test-bucket/duck_cache_evolve/');
+
+statement ok
+COPY (SELECT 1 AS a) TO 's3://test-bucket/duck_cache_evolve/data.parquet';
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.duck_cache_recreate;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_recreate (a INTEGER) WITH (format='csv', location='s3a://test-bucket/duck_cache_recreate/');
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_long (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_short (TYPE hive_metastore, METADATA_CACHE_TTL 1);
+
+foreach catalog hms_long hms_short
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('${catalog}.sample_db.duck_cache_evolve');
+----
+a
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('${catalog}.sample_db.duck_cache_recreate');
+----
+a
+
+endloop
+
+# Parquet: rewrite the only data file with an extra column. The metastore definition does not change.
+sleep 1 seconds
+
+statement ok
+COPY (SELECT 1 AS a, 'x' AS b) TO 's3://test-bucket/duck_cache_evolve/data.parquet';
+
+# CSV: the columns come from the metastore, so drop and recreate the table with an extra column
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_recreate;
+
+statement ok
+CREATE TABLE hms_writer.sample_db.duck_cache_recreate (a INTEGER, b VARCHAR) WITH (format='csv', location='s3a://test-bucket/duck_cache_recreate/');
+
+sleep 2 seconds
+
+# Within its TTL, a catalog keeps using what it loaded
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms_long.sample_db.duck_cache_evolve');
+----
+a
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms_long.sample_db.duck_cache_recreate');
+----
+a
+
+# After its TTL, a catalog sees the new schemas without being re-attached
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms_short.sample_db.duck_cache_evolve');
+----
+a,b
+
+query II
+SELECT a, b FROM hms_short.sample_db.duck_cache_evolve;
+----
+1	x
+
+query I
+SELECT string_agg(name, ',' ORDER BY cid) FROM pragma_table_info('hms_short.sample_db.duck_cache_recreate');
+----
+a,b
+
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_evolve;
+
+statement ok
+DROP TABLE hms_writer.sample_db.duck_cache_recreate;
