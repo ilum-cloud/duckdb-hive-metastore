@@ -15,9 +15,9 @@ services:
       timeout: 5s
       retries: 5
   
-  # S3 compatible storage using MinIO
+  # S3 compatible storage using MinIO (minio/minio is no longer published on Docker Hub)
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: minio
     ports:
       - "9000:9000"
@@ -35,7 +35,7 @@ services:
   
   # Create test bucket in MinIO
   minio-setup:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: minio-setup
     depends_on:
       minio:
