@@ -151,12 +151,45 @@ ATTACH 'thrift://<host>:<port>' AS <catalog_name> (<options>);
   - `WAREHOUSE_LOCATION`: The warehouse location path. Used for table storage location resolution (mostly not required, but can be useful in some cases).
   - `DEFAULT_SCHEMA`: The database/schema name to use when queries don't specify one. Defaults to `default` if not provided.
   - `METADATA_CACHE_TTL`: How many seconds table and database metadata loaded from the metastore is reused before it is revalidated. Defaults to `5`; `0` revalidates in every transaction. See [Metadata caching](#metadata-caching).
+  - `PARTITION_MODE`: How the files of a partitioned table are located: `auto` (default), `hms` or `path`. See [Partitioned tables](#partitioned-tables).
 
 **Example:**
 
 ```sql
 ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore);
 ```
+
+### Partitioned tables
+
+A partitioned table is read through the partitions registered in the metastore:
+
+- **Each partition is read at the location the metastore records for it**, which may be anywhere, including outside
+  the table location. Directories do not have to be named `key=value`: layouts like `production/2024/` work, and so do
+  partitions moved to another bucket or prefix.
+- **The partition column values come from the metastore**, not from the directory names, so they are correct
+  regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
+- **Filters on partition columns still skip files.** A filter that cannot match a partition's values drops that
+  partition before its location is even listed.
+- **Data files written by Hive are picked up too**, including the extension-less names Hive gives them (`000000_0`).
+- **Partition columns come last, in the order the metastore declares them.** For a table partitioned by
+  `(year, month, region)` the columns end with `year, month, region`, which is the order Hive and Spark report.
+- The partition list is fetched the first time a table is scanned, never while listing or resolving tables, and is
+  then reused for `METADATA_CACHE_TTL` seconds.
+
+`PARTITION_MODE` controls this:
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | Use the registered partitions; fall back to globbing the table location when a table has none |
+| `hms` | Always use the registered partitions; fail if a partitioned table has none |
+| `path` | Never read the partition list: glob the table location and take partition values from `key=value` directory names |
+
+```sql
+ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore, PARTITION_MODE 'hms');
+```
+
+Partitioned CSV and Avro tables are not covered yet: their partition columns are not filled in (they were not before
+this either), so only the columns stored in the files are returned.
 
 ### Metadata caching
 
@@ -335,7 +368,7 @@ Error handling:
 ### Important Notes
 
 - **Format Extensions:** The HMS extension delegates data reading to DuckDB's format scanners. Install required extensions (`delta`, `iceberg`, etc.) before querying those table types.
-- **Partitioning:** Hive-style partitioning is automatically detected and applied during query execution.
+- **Partitioning:** Partitioned Parquet tables are read through the partitions registered in the metastore, at the locations it records, with the partition values it holds. See [Partitioned tables](#partitioned-tables).
 - **Spark Compatibility:** Tables created by Spark (including complex types like structs, arrays, maps) are fully supported through Spark schema metadata parsing.
 
 ## Building
