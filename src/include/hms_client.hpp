@@ -28,8 +28,12 @@ public:
 	vector<string> GetAllTables(const string &db_name);
 
 	Apache::Hadoop::Hive::Database GetDatabase(const string &db_name);
-	Apache::Hadoop::Hive::Table GetTable(const string &db_name, const string &table_name);
+	// Fetch one table. Returns false if the table does not exist; other Thrift errors are re-thrown so callers can
+	// distinguish "missing" from "broken".
+	bool TryGetTable(const string &db_name, const string &table_name, Apache::Hadoop::Hive::Table &result);
 	vector<Apache::Hadoop::Hive::Table> GetTableObjects(const string &db_name, const vector<string> &table_names);
+	// Names and types of the tables matching the patterns, across databases, in one call
+	vector<Apache::Hadoop::Hive::TableMeta> GetTableMeta(const string &db_patterns, const string &table_patterns);
 	// Create a table in the metastore using a Thrift Table object
 	void CreateTable(const Apache::Hadoop::Hive::Table &table);
 	// Drop a table from the metastore. delete_data=false preserves the underlying

@@ -1,0 +1,44 @@
+# name: test/sql/cache/similar_entry_no_discovery.test
+# description: "Did you mean" suggestions for a missing table (local or HMS) use HMS table names only, without loading any table
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CREATE TABLE duck_cache_local_orders AS SELECT 1 AS id;
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+# DuckDB looks for similar names in every schema of every attached catalog, including the HMS ones
+statement error
+SELECT * FROM duck_cache_local_ordrs;
+----
+Did you mean "duck_cache_local_orders"
+
+statement error
+SELECT * FROM hms.sample_db.custmers;
+----
+Did you mean "customers"
+
+query III
+SELECT (SELECT count(*) FROM duckdb_logs_parsed('HTTP')),
+       (SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive\_metastore rpc=get\_all\_tables%' ESCAPE '\'),
+       (SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive\_metastore rpc=get\_table\_objects\_by\_name%' ESCAPE '\');
+----
+0	0	0
+
+statement ok
+CALL disable_logging();

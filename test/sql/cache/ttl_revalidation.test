@@ -1,0 +1,87 @@
+# name: test/sql/cache/ttl_revalidation.test
+# description: Once METADATA_CACHE_TTL has passed, a lookup revalidates only the table it resolves
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement error
+ATTACH 'thrift://localhost:9083' AS hms_invalid (TYPE hive_metastore, METADATA_CACHE_TTL -1);
+----
+METADATA_CACHE_TTL must be a number of seconds >= 0
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_writer (TYPE hive_metastore);
+
+foreach table duck_cache_ttl_alpha duck_cache_ttl_beta
+
+statement ok
+DROP TABLE IF EXISTS hms_writer.sample_db.${table};
+
+statement ok
+CREATE TABLE hms_writer.sample_db.${table} (id INTEGER) WITH (format='parquet', location='s3a://test-bucket/${table}/');
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/${table}/data.parquet';
+
+endloop
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 1);
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_ttl_alpha');
+----
+1
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_ttl_beta');
+----
+1
+
+sleep 2 seconds
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM pragma_table_info('hms.sample_db.duck_cache_ttl_alpha');
+----
+1
+
+# The expired entry was revalidated (metastore call and schema discovery), and nothing else was touched
+query II
+SELECT count(*) FILTER (WHERE request.url LIKE '%duck\_cache\_ttl\_alpha%' ESCAPE '\') > 0,
+       count(*) FILTER (WHERE request.url NOT LIKE '%duck\_cache\_ttl\_alpha%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP');
+----
+true	0
+
+query III
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_table db=sample_db table=duck_cache_ttl_alpha'),
+       count(*) FILTER (WHERE message = 'hive_metastore rpc=get_table db=sample_db table=duck_cache_ttl_beta'),
+       count(*) FILTER (WHERE message LIKE 'hive\_metastore rpc=get\_all\_tables%' ESCAPE '\')
+FROM duckdb_logs;
+----
+1	0	0
+
+statement ok
+CALL disable_logging();
+
+foreach table duck_cache_ttl_alpha duck_cache_ttl_beta
+
+statement ok
+DROP TABLE hms_writer.sample_db.${table};
+
+endloop

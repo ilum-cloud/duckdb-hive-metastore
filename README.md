@@ -99,7 +99,9 @@ The following table shows which SQL operations are supported for each table form
   extension does not surface the column at all.
 - Workaround: rewrite the data files with the new column projected (e.g.
   `INSERT OVERWRITE` from Spark) so the Parquet footer carries the new column.
-  Once present in the files, DuckDB sees it.
+  Once present in the files, DuckDB sees it after its cached metadata for the
+  table expires (see [Metadata caching](#metadata-caching)) or after
+  `CALL hms_clear_cache()`.
 - Tracking: see the schema-drift issue on GitHub. The acceptance test
   `test/sql/oss/schema_drift.test` is currently disabled.
 
@@ -148,11 +150,45 @@ ATTACH 'thrift://<host>:<port>' AS <catalog_name> (<options>);
   - `TYPE` (required): Must be set to `hive_metastore` to indicate that we want to use the Hive Metastore extension
   - `WAREHOUSE_LOCATION`: The warehouse location path. Used for table storage location resolution (mostly not required, but can be useful in some cases).
   - `DEFAULT_SCHEMA`: The database/schema name to use when queries don't specify one. Defaults to `default` if not provided.
+  - `METADATA_CACHE_TTL`: How many seconds table and database metadata loaded from the metastore is reused before it is revalidated. Defaults to `5`; `0` revalidates in every transaction. See [Metadata caching](#metadata-caching).
 
 **Example:**
 
 ```sql
 ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore);
+```
+
+### Metadata caching
+
+The extension loads metadata lazily and caches it per attached catalog:
+
+- **Querying a table** loads only that table: one `get_table` call to the metastore plus, for Parquet, Delta and
+  Iceberg tables, schema discovery on that table's own files. The number of other tables in the database does not
+  matter.
+- **Listing tables** (`SHOW TABLES`, `information_schema`, `duckdb_tables()`, `duckdb_columns()`) loads every table of
+  every database in the catalog, including schema discovery, because these views report column information. Tables
+  that are already cached and fresh are not loaded again. A table whose metadata cannot be mapped (e.g. a Hive column
+  type DuckDB does not support) is left out of listings with a warning in the DuckDB log; querying it directly fails
+  with the mapping error.
+- **"Did you mean" suggestions** for a missing table only fetch table names (a single metastore call), even when the
+  missing table is not in this catalog.
+- **Revalidation:** once cached metadata is older than `METADATA_CACHE_TTL` seconds, the next query that uses the table
+  fetches it again. Parquet, Delta and Iceberg schemas are rediscovered from the files, so file-only schema changes are
+  picked up; tables dropped or recreated outside DuckDB are noticed as well. Loads of the same table (or listings of
+  the same database) by concurrent queries are performed once.
+- **Transactions** see a consistent snapshot: once a table has been resolved in a transaction, later statements of that
+  transaction keep using the same metadata.
+- **Manual refresh:** `CALL hms_clear_cache();` marks all cached metadata of all attached Hive Metastore catalogs stale,
+  so the next queries revalidate it immediately.
+- If the metastore cannot be reached while revalidating, the cached metadata keeps being used (with a warning in the
+  DuckDB log); a table that was never loaded fails with the connection error.
+
+```sql
+-- Revalidate metadata at most every 10 minutes
+ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore, METADATA_CACHE_TTL 600);
+
+-- Pick up changes made by other engines right away
+CALL hms_clear_cache();
 ```
 
 ### Querying Tables

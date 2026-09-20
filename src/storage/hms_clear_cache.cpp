@@ -4,6 +4,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "storage/hms_catalog.hpp"
+#include "storage/hms_transaction.hpp"
 
 namespace duckdb {
 
@@ -30,6 +31,11 @@ static void ClearHMSCaches(ClientContext &context) {
 			continue;
 		}
 		catalog.Cast<HMSCatalog>().ClearCache();
+		// Also forget what the calling transaction already resolved, so its next lookups see fresh metadata
+		auto transaction = Transaction::TryGet(context, *db_ref);
+		if (transaction) {
+			transaction->Cast<HMSTransaction>().ClearSnapshot();
+		}
 	}
 }
 
@@ -40,6 +46,8 @@ static void ClearCacheFunction(ClientContext &context, TableFunctionInput &data_
 	}
 	ClearHMSCaches(context);
 	data.finished = true;
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::BOOLEAN(true));
 }
 
 void HMSClearCacheFunction::ClearCacheOnSetting(ClientContext &context, SetScope scope, Value &parameter) {
