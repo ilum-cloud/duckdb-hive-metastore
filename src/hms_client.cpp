@@ -121,6 +121,36 @@ vector<Apache::Hadoop::Hive::Table> HMSClient::GetTableObjects(const string &db_
 	return tables;
 }
 
+vector<string> HMSClient::GetPartitionNames(const string &db_name, const string &table_name) {
+	if (!connected)
+		Open();
+	vector<string> partition_names;
+	try {
+		// -1: no limit. Names are cheap; the storage descriptors are fetched separately per batch.
+		client->get_partition_names(partition_names, db_name, table_name, -1);
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		return partition_names;
+	} catch (apache::thrift::TException &tx) {
+		throw IOException("Failed to list the partitions of '%s.%s': %s", db_name, table_name, tx.what());
+	}
+	return partition_names;
+}
+
+vector<Apache::Hadoop::Hive::Partition> HMSClient::GetPartitionsByNames(const string &db_name, const string &table_name,
+                                                                        const vector<string> &partition_names) {
+	if (!connected)
+		Open();
+	vector<Apache::Hadoop::Hive::Partition> partitions;
+	try {
+		client->get_partitions_by_names(partitions, db_name, table_name, partition_names);
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		return partitions;
+	} catch (apache::thrift::TException &tx) {
+		throw IOException("Failed to get the partitions of '%s.%s': %s", db_name, table_name, tx.what());
+	}
+	return partitions;
+}
+
 void HMSClient::CreateTable(const Apache::Hadoop::Hive::Table &table) {
 	if (!connected)
 		Open();

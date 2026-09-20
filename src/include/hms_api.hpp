@@ -35,6 +35,14 @@ struct HMSAPITable {
 	bool HasSameDefinition(const HMSAPITable &other) const;
 };
 
+//! One partition of a table, as the metastore stores it
+struct HMSAPIPartition {
+	//! Partition values, positionally aligned with HMSAPITable::partition_keys
+	vector<string> values;
+	//! The partition's own storage location, which may be anywhere
+	string location;
+};
+
 class HMSAPI {
 public:
 	static vector<HMSAPISchema> GetSchemas(ClientContext &ctx, const string &endpoint);
@@ -49,6 +57,13 @@ public:
 	static vector<HMSAPITable> GetTables(ClientContext &ctx, const string &schema, const vector<string> &table_names,
 	                                     const string &endpoint);
 	static HMSAPITable FromThrift(const Apache::Hadoop::Hive::Table &table);
+
+	//! Names of all partitions of a table; empty if it has none registered
+	static vector<string> GetPartitionNames(ClientContext &ctx, const string &schema, const string &table,
+	                                        const string &endpoint);
+	//! The named partitions, with the location each one is stored at
+	static vector<HMSAPIPartition> GetPartitions(ClientContext &ctx, const string &schema, const string &table,
+	                                             const vector<string> &partition_names, const string &endpoint);
 
 	// Create a table in HMS
 	static void CreateTable(ClientContext &ctx, const Apache::Hadoop::Hive::Table &table, const string &endpoint);

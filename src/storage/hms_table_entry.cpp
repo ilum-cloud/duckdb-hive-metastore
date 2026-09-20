@@ -1,4 +1,5 @@
 #include "storage/hms_catalog.hpp"
+#include "storage/hms_multi_file_reader.hpp"
 #include "storage/hms_schema_entry.hpp"
 #include "storage/hms_table_entry.hpp"
 #include "hms_api.hpp"
@@ -77,6 +78,20 @@ unique_ptr<HMSTableEntry> HMSTableEntry::Build(ClientContext &context, Catalog &
 			}
 		}
 
+		// A partitioned table keeps its partition values in the metastore, not in the data files, so the scan fills
+		// those columns itself. Add them here, in the order the metastore declares them (Hive puts them last).
+		if (InjectsPartitionColumns(table, hms::FormatDetector::Detect(table))) {
+			for (auto &partition_key : table.partition_keys) {
+				auto partition_type = HMSUtils::TypeToLogicalType(context, partition_key.type);
+				if (info.columns.ColumnExists(partition_key.name)) {
+					auto &existing = info.columns.GetColumnMutable(partition_key.name);
+					existing.SetType(partition_type);
+				} else {
+					info.columns.AddColumn(ColumnDefinition(partition_key.name, partition_type));
+				}
+			}
+		}
+
 		// Add HMS metadata as tags for inter-extension communication (e.g., with OpenLineage)
 		// This allows other extensions to access HMS metadata without code dependencies
 		info.tags["hms_storage_location"] = table.storage_location;
@@ -114,6 +129,126 @@ bool HMSTableEntry::HasSameColumns(const HMSTableEntry &other) const {
 		}
 	}
 	return true;
+}
+
+bool HMSTableEntry::InjectsPartitionColumns(const HMSAPITable &table, const hms::FormatDetectionResult &format) {
+	// Delta and Iceberg keep their own partition metadata and are read by their own extensions. CSV and Avro are not
+	// covered yet: their partition columns are missing today as well, and their scans need separate work.
+	return !table.partition_keys.empty() && !format.IsDelta() && !format.IsIceberg() && format.IsParquet();
+}
+
+//! The name the metastore uses for a partition, rebuilt from the partition keys and values
+static string PartitionDisplayName(const HMSAPITable &table, const vector<string> &values) {
+	string result;
+	for (idx_t i = 0; i < table.partition_keys.size() && i < values.size(); i++) {
+		if (!result.empty()) {
+			result += "/";
+		}
+		result += table.partition_keys[i].name + "=" + values[i];
+	}
+	return result;
+}
+
+static Value PartitionValue(const string &raw, const LogicalType &type, const string &column,
+                            const string &partition_name, const string &table_name) {
+	// What Hive stores for a row whose partition column is NULL. Unlike a path segment this value is not escaped,
+	// and the literal string "NULL" is a value of its own.
+	if (raw == "__HIVE_DEFAULT_PARTITION__") {
+		return Value(type);
+	}
+	Value result;
+	string error;
+	if (!Value(raw).DefaultTryCastAs(type, result, &error)) {
+		throw InvalidInputException(
+		    "Partition \"%s\" of table \"%s\": cannot read the value '%s' of partition column \"%s\" as %s",
+		    partition_name, table_name, raw, column, type.ToString());
+	}
+	return result;
+}
+
+shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext &context) {
+	auto &hms_catalog = catalog.Cast<HMSCatalog>();
+	auto generation = hms_catalog.GetCacheGeneration();
+	{
+		lock_guard<mutex> guard(partition_lock);
+		if (partition_plan && partition_plan_generation == generation &&
+		    std::chrono::steady_clock::now() - partition_plan_loaded_at < hms_catalog.GetMetadataCacheTTL()) {
+			return partition_plan;
+		}
+	}
+
+	auto format = hms::FormatDetector::Detect(*table_data);
+	auto plan = make_shared_ptr<HMSPartitionPlan>();
+	plan->source = HMSPartitionSource::PATH;
+	for (auto &partition_key : table_data->partition_keys) {
+		plan->names.push_back(partition_key.name);
+		plan->types.push_back(HMSUtils::TypeToLogicalType(context, partition_key.type));
+	}
+
+	auto mode = hms_catalog.GetPartitionMode();
+	if (mode != HMSPartitionMode::PATH) {
+		vector<HMSAPIPartition> partitions;
+		try {
+			auto partition_names = HMSAPI::GetPartitionNames(context, schema.name, name, hms_catalog.endpoint);
+			partitions = HMSAPI::GetPartitions(context, schema.name, name, partition_names, hms_catalog.endpoint);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			lock_guard<mutex> guard(partition_lock);
+			if (error.Type() == ExceptionType::INTERRUPT || !partition_plan) {
+				throw;
+			}
+			// The metastore could not be reached: keep scanning the partitions we know until the TTL expires again
+			DUCKDB_LOG_WARNING(context,
+			                   "hive_metastore: failed to refresh the partitions of \"%s.%s\", using the cached "
+			                   "partition list: %s",
+			                   schema.name, name, error.RawMessage());
+			partition_plan_loaded_at = std::chrono::steady_clock::now();
+			partition_plan_generation = generation;
+			return partition_plan;
+		}
+		for (auto &partition : partitions) {
+			HMSScanPartition scan_partition;
+			scan_partition.name = PartitionDisplayName(*table_data, partition.values);
+			if (partition.location.empty() || partition.values.size() != table_data->partition_keys.size()) {
+				DUCKDB_LOG_WARNING(context,
+				                   "hive_metastore: skipping partition \"%s\" of \"%s.%s\": it has no location or "
+				                   "does not match the partition columns",
+				                   scan_partition.name, schema.name, name);
+				continue;
+			}
+			// A partition location gets the same treatment as a table location: placeholder stripping, s3a/oss/cos
+			// rewriting and the http endpoint handling
+			auto path_result = hms::PathUtils::NormalizeScanPath(partition.location, *table_data, format);
+			scan_partition.location = path_result.scan_path;
+			scan_partition.scan_location = hms::PathUtils::BuildPartitionGlobPattern(path_result.scan_path, format);
+			scan_partition.fallback_scan_location =
+			    hms::PathUtils::BuildPartitionFallbackGlobPattern(path_result.scan_path);
+			if (path_result.needs_s3_config) {
+				plan->needs_s3_config = true;
+				plan->s3_endpoint = path_result.s3_endpoint;
+			}
+			for (idx_t i = 0; i < table_data->partition_keys.size(); i++) {
+				scan_partition.values.push_back(
+				    PartitionValue(partition.values[i], plan->types[i], plan->names[i], scan_partition.name, name));
+			}
+			plan->partitions.push_back(std::move(scan_partition));
+		}
+		if (!plan->partitions.empty()) {
+			plan->source = HMSPartitionSource::HMS;
+		}
+	}
+
+	if (plan->source != HMSPartitionSource::HMS && mode == HMSPartitionMode::HMS) {
+		throw InvalidInputException("Table \"%s.%s\" declares partition columns but has no partition registered in "
+		                            "the Hive Metastore (PARTITION_MODE 'hms')",
+		                            schema.name, name);
+	}
+
+	lock_guard<mutex> guard(partition_lock);
+	partition_plan = std::move(plan);
+	partition_plan_loaded_at = std::chrono::steady_clock::now();
+	partition_plan_generation = generation;
+	return partition_plan;
 }
 
 unique_ptr<BaseStatistics> HMSTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -174,6 +309,9 @@ bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catal
 	try {
 		vector<Value> inputs = {Value(scan_path)};
 		named_parameter_map_t param_map;
+		// Discover the columns the files actually hold. Partition columns are added from the metastore afterwards,
+		// which also keeps the result independent of how the partition directories happen to be named.
+		param_map["hive_partitioning"] = Value::BOOLEAN(false);
 		vector<LogicalType> return_types;
 		vector<string> names;
 		TableFunctionRef empty_ref;
@@ -188,24 +326,9 @@ bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catal
 			return false;
 		}
 
-		// Build a map of partition column types from HMS schema
-		// For Parquet tables, partition columns must use HMS types (not discovered from files)
-		case_insensitive_map_t<LogicalType> partition_key_types;
-		if (format_result.IsParquet() && !table_data.partition_keys.empty()) {
-			for (const auto &pk : table_data.partition_keys) {
-				partition_key_types[pk.name] = HMSUtils::TypeToLogicalType(context, pk.type);
-			}
-		}
-
 		columns.clear();
 		for (idx_t i = 0; i < names.size(); i++) {
-			// For partition columns in Parquet tables, use HMS type instead of discovered type
-			auto partition_type_it = partition_key_types.find(names[i]);
-			if (partition_type_it != partition_key_types.end()) {
-				columns.push_back(ColumnDefinition(names[i], partition_type_it->second));
-			} else {
-				columns.push_back(ColumnDefinition(names[i], return_types[i]));
-			}
+			columns.push_back(ColumnDefinition(names[i], return_types[i]));
 		}
 
 		return true;
@@ -291,18 +414,21 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		param_map["allow_moved_paths"] = Value::BOOLEAN(true);
 	}
 
-	// For partitioned Parquet tables, enable hive_partitioning to read partition columns from directory names
-	if (!format_result.IsDelta() && !format_result.IsIceberg() && !table_data->partition_keys.empty() &&
-	    format_result.IsParquet()) {
-		param_map["hive_partitioning"] = Value::BOOLEAN(true);
-
-		// Specify partition column types to match HMS metadata and avoid BIGINT inference
-		child_list_t<Value> hive_types_children;
-		for (const auto &pk : table_data->partition_keys) {
-			auto duckdb_type = HMSUtils::TypeToLogicalType(context, pk.type);
-			hive_types_children.push_back(make_pair(pk.name, Value(duckdb_type.ToString())));
+	// For partitioned tables, scan the partitions the metastore registered, at the locations it recorded, and fill
+	// the partition columns from the values it holds. DuckDB's own hive partitioning is not used: it can only read
+	// values out of key=value directory names and rejects any other layout.
+	if (InjectsPartitionColumns(*table_data, format_result)) {
+		auto partition_plan = GetPartitionPlan(context);
+		if (partition_plan->needs_s3_config) {
+			Value endpoint_val = Value(partition_plan->s3_endpoint);
+			Value use_ssl_val = Value(false);
+			Value url_style_val = Value("path");
+			context.db->config.SetOption("s3_endpoint", endpoint_val);
+			context.db->config.SetOption("s3_use_ssl", use_ssl_val);
+			context.db->config.SetOption("s3_url_style", url_style_val);
 		}
-		param_map["hive_types"] = Value::STRUCT(std::move(hive_types_children));
+		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(partition_plan);
+		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 	}
 
 	// For CSV/Text tables, we must provide the schema to avoid type mismatch crashes

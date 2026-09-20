@@ -3,6 +3,7 @@ add_library(
   hms_catalog.cpp
   hms_catalog_set.cpp
   hms_clear_cache.cpp
+  hms_multi_file_reader.cpp
   hms_schema_entry.cpp
   hms_schema_set.cpp
   hms_table_entry.cpp

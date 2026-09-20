@@ -34,6 +34,11 @@ public:
 	vector<Apache::Hadoop::Hive::Table> GetTableObjects(const string &db_name, const vector<string> &table_names);
 	// Names and types of the tables matching the patterns, across databases, in one call
 	vector<Apache::Hadoop::Hive::TableMeta> GetTableMeta(const string &db_patterns, const string &table_patterns);
+	// Names ("k=v/k=v") of all partitions of a table; empty if the table has none
+	vector<string> GetPartitionNames(const string &db_name, const string &table_name);
+	// The named partitions, each with its own storage descriptor (and therefore its own location)
+	vector<Apache::Hadoop::Hive::Partition> GetPartitionsByNames(const string &db_name, const string &table_name,
+	                                                             const vector<string> &partition_names);
 	// Create a table in the metastore using a Thrift Table object
 	void CreateTable(const Apache::Hadoop::Hive::Table &table);
 	// Drop a table from the metastore. delete_data=false preserves the underlying

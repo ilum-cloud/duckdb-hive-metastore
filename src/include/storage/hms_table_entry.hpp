@@ -9,14 +9,21 @@
 #pragma once
 
 #include "hms_lineage.hpp"
+#include "storage/hms_partition_plan.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+
+#include <chrono>
 
 namespace duckdb {
 
 // Forward declarations to avoid including Thrift-dependent headers
 struct HMSAPITable;
 struct HMSAPIColumnDefinition;
+namespace hms {
+struct FormatDetectionResult;
+} // namespace hms
 
 //! Where the columns of a table entry come from
 enum class HMSSchemaSource : uint8_t {
@@ -39,6 +46,14 @@ public:
 
 	//! Whether both entries have the same column names and types, in the same order
 	bool HasSameColumns(const HMSTableEntry &other) const;
+
+	//! Whether the scan of this table fills the partition columns itself, which is also what makes the entry carry
+	//! them. Decided from the metastore metadata alone, so it never costs a request.
+	static bool InjectsPartitionColumns(const HMSAPITable &table, const hms::FormatDetectionResult &format);
+
+	//! How to locate this table's files and fill its partition columns. The partition list is fetched on the first
+	//! scan and reused for the catalog's metadata cache TTL. Never called while looking up or listing tables.
+	shared_ptr<const HMSPartitionPlan> GetPartitionPlan(ClientContext &context);
 
 	unique_ptr<HMSAPITable> table_data;
 	HMSSchemaSource schema_source = HMSSchemaSource::HMS_COLUMNS;
@@ -68,6 +83,12 @@ public:
 	//! Get lineage metadata for this HMS table
 	//! Returns lineage information including storage location, table type, etc.
 	HMSLineageInfo GetLineageInfo() const;
+
+private:
+	mutex partition_lock;
+	shared_ptr<const HMSPartitionPlan> partition_plan;
+	std::chrono::steady_clock::time_point partition_plan_loaded_at;
+	idx_t partition_plan_generation = 0;
 };
 
 } // namespace duckdb
