@@ -1,0 +1,99 @@
+# name: test/sql/hive/partition_pruning.test
+# description: A filter on a partition column skips the files of the partitions that cannot match
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10), (2, 20)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 30)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2025/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40), (5, 50)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_outside/staging_2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (6, 60)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/unknown/2025/data.parquet';
+
+# Hive names its own data files after the task that wrote them, without an extension
+statement ok
+COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/hivefile/2026/000000_0' (FORMAT parquet);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'production';
+----
+3
+
+# Only the two 'production' locations were listed or read: nothing under the 'staging' or NULL partitions
+query III
+SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/production/%' ESCAPE '\') > 0,
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_outside%' ESCAPE '\'),
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/unknown%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP');
+----
+true	0	0
+
+# A filter on the second partition column prunes as well. Binding the scan still lists the first partition to read
+# the Parquet schema from one of its files, so assert on the data files: a pruned partition is never read.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE year = 2025;
+----
+2
+
+query I
+SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%production/2024/data.parquet%') FROM duckdb_logs_parsed('HTTP');
+----
+0
+
+# Partition pruning on a table that does use key=value directories keeps working. Binding reads the schema from one
+# file, so compare a filtered scan against a full one rather than expecting no requests at all.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.reviews;
+----
+150
+
+statement ok
+CREATE TABLE full_scan_requests AS SELECT count(*) AS requests FROM duckdb_logs_parsed('HTTP');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.reviews WHERE rating = 5;
+----
+30
+
+query I
+SELECT (SELECT count(*) FROM duckdb_logs_parsed('HTTP')) < (SELECT requests FROM full_scan_requests);
+----
+true
+
+statement ok
+CALL disable_logging();

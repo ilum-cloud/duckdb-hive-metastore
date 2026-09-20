@@ -1,0 +1,85 @@
+# name: test/sql/hive/partition_mode_option.test
+# description: The PARTITION_MODE attach option chooses between the metastore's partitions and the table location
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10), (2, 20)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 30)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2025/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40), (5, 50)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_outside/staging_2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (6, 60)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/unknown/2025/data.parquet';
+
+# Hive names its own data files after the task that wrote them, without an extension
+statement ok
+COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/hivefile/2026/000000_0' (FORMAT parquet);
+
+statement error
+ATTACH 'thrift://localhost:9083' AS hms_invalid (TYPE hive_metastore, PARTITION_MODE 'sometimes');
+----
+PARTITION_MODE must be one of 'auto', 'hms', 'path'
+
+# path: glob the table location and read partition values off the directory names, as DuckDB does natively. The
+# fixture's directories carry none, so the columns are there but empty, and the partition outside the table
+# location is not read at all.
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_path (TYPE hive_metastore, PARTITION_MODE 'path');
+
+query I
+SELECT count(*) FROM hms_path.sample_db.duck_fixture_nonstd;
+----
+4
+
+query I
+SELECT count(*) FROM hms_path.sample_db.duck_fixture_nonstd WHERE region IS NULL AND year IS NULL;
+----
+4
+
+# auto (the default) uses the partitions the metastore registered
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_auto (TYPE hive_metastore, PARTITION_MODE 'auto');
+
+query I
+SELECT count(*) FROM hms_auto.sample_db.duck_fixture_nonstd;
+----
+7
+
+# hms: refuse to guess when a partitioned table has no partition registered
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_strict (TYPE hive_metastore, PARTITION_MODE 'hms');
+
+query I
+SELECT count(*) FROM hms_strict.sample_db.duck_fixture_nonstd;
+----
+7
+
+statement error
+SELECT count(*) FROM hms_strict.sample_db.duck_fixture_noparts;
+----
+has no partition registered in the Hive Metastore
+
+# auto falls back to the table location for such a table instead of failing
+statement ok
+COPY (SELECT * FROM (VALUES (7)) t(review_id)) TO 's3://test-bucket/duck_fixture_noparts/data.parquet';
+
+query II
+SELECT review_id, region FROM hms_auto.sample_db.duck_fixture_noparts;
+----
+7	NULL
