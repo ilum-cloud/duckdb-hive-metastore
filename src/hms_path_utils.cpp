@@ -166,7 +166,27 @@ string PathUtils::BuildGlobPattern(const string &path, const FormatDetectionResu
 	if (HasFileExtension(path)) {
 		return path;
 	}
+	return AppendGlobPattern(path, format, is_partitioned);
+}
 
+string PathUtils::BuildPartitionGlobPattern(const string &path, const FormatDetectionResult &format) {
+	// A partition location is a directory even when its name looks like a file, which happens whenever a partition
+	// value contains a dot (`amount=10.99`). Always append the pattern; a partition that points at a single file is
+	// handled by the caller when the glob comes back empty.
+	return AppendGlobPattern(path, format, /*is_partitioned=*/true);
+}
+
+string PathUtils::BuildPartitionFallbackGlobPattern(const string &path) {
+	// Hive's own writers name files after the task that produced them (`000000_0`), without an extension, so a
+	// pattern matching the format's extension finds nothing. Fall back to every file Hive does not consider
+	// hidden: it skips names starting with `_` (`_SUCCESS`, `_temporary`) or `.`.
+	if (StringUtil::EndsWith(path, "/")) {
+		return path + "**/[!_.]*";
+	}
+	return path + "/**/[!_.]*";
+}
+
+string PathUtils::AppendGlobPattern(const string &path, const FormatDetectionResult &format, bool is_partitioned) {
 	// Delta and Iceberg don't need globs
 	if (format.IsDelta() || format.IsIceberg()) {
 		return path;

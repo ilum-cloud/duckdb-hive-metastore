@@ -43,6 +43,10 @@ public:
 	// Build a glob pattern for directory-based scans
 	// e.g., /path/to/table -> /path/to/table/**/*.parquet
 	static string BuildGlobPattern(const string &path, const FormatDetectionResult &format, bool is_partitioned);
+	//! The glob for the files of one partition of a table
+	static string BuildPartitionGlobPattern(const string &path, const FormatDetectionResult &format);
+	//! A permissive glob for a partition, for files written without an extension
+	static string BuildPartitionFallbackGlobPattern(const string &path);
 
 	// Check if a path looks like a file (has extension)
 	static bool HasFileExtension(const string &path);
@@ -71,6 +75,9 @@ public:
 private:
 	// Try to get location from table parameters
 	static string GetLocationFromParams(const map<string, string> &parameters);
+
+	// Append the glob that matches the data files of a directory, for the given format
+	static string AppendGlobPattern(const string &path, const FormatDetectionResult &format, bool is_partitioned);
 };
 
 } // namespace hms

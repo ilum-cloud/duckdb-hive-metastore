@@ -10,6 +10,10 @@ namespace duckdb {
 // metastore's message size limits.
 static constexpr idx_t TABLE_OBJECTS_BATCH_SIZE = 100;
 
+// Partitions are fetched in batches as well: a table can have hundreds of thousands of them, and each one carries a
+// full storage descriptor.
+static constexpr idx_t PARTITION_BATCH_SIZE = 200;
+
 unique_ptr<HMSClient> HMSAPI::GetClient(const string &endpoint) {
 	// Parse host and port from endpoint
 	// Expected format: "thrift://hostname:port" or "hostname:port"
@@ -99,6 +103,40 @@ vector<HMSAPITable> HMSAPI::GetTables(ClientContext &ctx, const string &schema, 
 		DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_table_objects_by_name db=%s tables=%d", schema, batch.size());
 		for (const auto &thrift_table : client->GetTableObjects(schema, batch)) {
 			result.push_back(FromThrift(thrift_table));
+		}
+	}
+	return result;
+}
+
+vector<string> HMSAPI::GetPartitionNames(ClientContext &ctx, const string &schema, const string &table,
+                                         const string &endpoint) {
+	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partition_names db=%s table=%s", schema, table);
+	auto client = GetClient(endpoint);
+	return client->GetPartitionNames(schema, table);
+}
+
+vector<HMSAPIPartition> HMSAPI::GetPartitions(ClientContext &ctx, const string &schema, const string &table,
+                                              const vector<string> &partition_names, const string &endpoint) {
+	vector<HMSAPIPartition> result;
+	if (partition_names.empty()) {
+		return result;
+	}
+	auto client = GetClient(endpoint);
+	for (idx_t offset = 0; offset < partition_names.size(); offset += PARTITION_BATCH_SIZE) {
+		auto end = MinValue<idx_t>(offset + PARTITION_BATCH_SIZE, partition_names.size());
+		vector<string> batch;
+		for (idx_t i = offset; i < end; i++) {
+			batch.push_back(partition_names[i]);
+		}
+		DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partitions_by_names db=%s table=%s partitions=%d", schema, table,
+		                 batch.size());
+		for (const auto &partition : client->GetPartitionsByNames(schema, table, batch)) {
+			// The response carries no partition name and is not required to preserve the request order, so a
+			// caller that wants one composes it from the table's partition keys and these values.
+			HMSAPIPartition converted;
+			converted.values = vector<string>(partition.values.begin(), partition.values.end());
+			converted.location = partition.sd.location;
+			result.push_back(std::move(converted));
 		}
 	}
 	return result;

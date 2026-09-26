@@ -1,0 +1,91 @@
+# name: test/sql/hive/nonstandard_partition_locations.test
+# description: Read a partitioned table whose directories are not named key=value, taking the partition values from the metastore
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# One file per partition location. The directories carry no partition values, which is the point of the fixture.
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10), (2, 20)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 30)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2025/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40), (5, 50)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_outside/staging_2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (6, 60)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/unknown/2025/data.parquet';
+
+# Hive names its own data files after the task that wrote them, without an extension
+statement ok
+COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/hivefile/2026/000000_0' (FORMAT parquet);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# The partition columns are part of the table, last and with the types the metastore declares
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_nonstd') ORDER BY cid;
+----
+review_id	INTEGER
+product_id	INTEGER
+region	VARCHAR
+year	INTEGER
+
+query TT
+SELECT DISTINCT typeof(region), typeof(year) FROM hms.sample_db.duck_fixture_nonstd;
+----
+VARCHAR	INTEGER
+
+# Every registered partition contributes rows, and each row carries the values the metastore records
+query IITI
+SELECT review_id, product_id, region, year FROM hms.sample_db.duck_fixture_nonstd ORDER BY review_id;
+----
+1	10	production	2024
+2	20	production	2024
+3	30	production	2025
+4	40	staging	2024
+5	50	staging	2024
+6	60	NULL	2025
+7	70	hivefile	2026
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd;
+----
+7
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'production';
+----
+3
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'production' AND year = 2025;
+----
+1
+
+# Hive writes __HIVE_DEFAULT_PARTITION__ for a partition column that is NULL
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region IS NULL;
+----
+1
+
+query II
+SELECT region, sum(product_id) FROM hms.sample_db.duck_fixture_nonstd GROUP BY region ORDER BY region;
+----
+hivefile	70
+production	60
+staging	90
+NULL	60

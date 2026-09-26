@@ -22,6 +22,16 @@
 namespace duckdb {
 class HMSSchemaEntry;
 
+//! How the files of a partitioned table are located (ATTACH option PARTITION_MODE)
+enum class HMSPartitionMode : uint8_t {
+	//! Use the partitions registered in the metastore; fall back to the table location when there are none
+	AUTO,
+	//! Always use the partitions registered in the metastore; error when a partitioned table has none
+	HMS,
+	//! Never read the partition list; glob the table location and read partition values from key=value paths
+	PATH
+};
+
 class HMSClearCacheFunction : public TableFunction {
 public:
 	HMSClearCacheFunction();
@@ -37,7 +47,8 @@ public:
 	explicit HMSCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
 	                    string endpoint, const string &default_schema, const string &warehouse_location = "",
 	                    string catalog_name = "hive_metastore",
-	                    idx_t metadata_cache_ttl_seconds = DEFAULT_METADATA_CACHE_TTL_SECONDS);
+	                    idx_t metadata_cache_ttl_seconds = DEFAULT_METADATA_CACHE_TTL_SECONDS,
+	                    HMSPartitionMode partition_mode = HMSPartitionMode::AUTO);
 	~HMSCatalog() override;
 
 	string internal_name;
@@ -84,6 +95,9 @@ public:
 	std::chrono::steady_clock::duration GetMetadataCacheTTL() const {
 		return metadata_cache_ttl;
 	}
+	HMSPartitionMode GetPartitionMode() const {
+		return partition_mode;
+	}
 	//! Incremented by ClearCache; catalog sets compare it to invalidate what they cached earlier
 	idx_t GetCacheGeneration() const {
 		return cache_generation.load();
@@ -100,6 +114,7 @@ private:
 	HMSSchemaSet schemas;
 	string default_schema;
 	std::chrono::steady_clock::duration metadata_cache_ttl;
+	HMSPartitionMode partition_mode;
 	atomic<idx_t> cache_generation;
 
 	mutex suggestion_lock;

@@ -18,7 +18,8 @@ ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
 # Test that multiple partition columns are correctly typed
 # Table is partitioned by year (INTEGER), month (INTEGER), region (VARCHAR)
-# Note: Hive stores partition columns at the end in alphabetical order (month, region, year)
+# Partition columns come last, in the order the metastore declares them (year, month, region), which is the order
+# Hive and Spark show for this table
 query TTTTTT
 DESCRIBE TABLE hms.sample_db.multi_partition;
 ----
@@ -46,6 +47,12 @@ YES
 NULL
 NULL
 NULL
+year
+INTEGER
+YES
+NULL
+NULL
+NULL
 month
 INTEGER
 YES
@@ -54,12 +61,6 @@ NULL
 NULL
 region
 VARCHAR
-YES
-NULL
-NULL
-NULL
-year
-INTEGER
 YES
 NULL
 NULL
