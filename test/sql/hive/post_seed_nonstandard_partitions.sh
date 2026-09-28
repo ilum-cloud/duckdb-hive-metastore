@@ -16,6 +16,10 @@ set -euo pipefail
 #   * duck_fixture_hms_types - every partition lives outside the table location, so the column types
 #                            come from the metastore rather than from a data file. Its partitions carry
 #                            a row count, as Hive records after gathering statistics.
+#   * duck_fixture_nested  - one partition's location lies inside another's; the tests also put a
+#                            directory under the table location that no partition points at.
+#   * duck_fixture_values_in_files - declares a partition column but has no partition registered;
+#                            the tests write files that hold the partition values themselves.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -65,6 +69,20 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_hms_types (id BIGINT,
 ALTER TABLE sample_db.duck_fixture_hms_types ADD IF NOT EXISTS
   PARTITION (batch='a') LOCATION 's3a://test-bucket/duck_fixture_hms_types_data/a'
   PARTITION (batch='b') LOCATION 's3a://test-bucket/duck_fixture_hms_types_data/b';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_nested (id INT)
+  PARTITIONED BY (part STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_nested';
+
+ALTER TABLE sample_db.duck_fixture_nested ADD IF NOT EXISTS
+  PARTITION (part='outer') LOCATION 's3a://test-bucket/duck_fixture_nested/outer'
+  PARTITION (part='inner') LOCATION 's3a://test-bucket/duck_fixture_nested/outer/inner';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_values_in_files (id INT)
+  PARTITIONED BY (region STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_values_in_files';
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it
