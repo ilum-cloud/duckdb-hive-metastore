@@ -7,7 +7,8 @@ set -euo pipefail
 #   * duck_fixture_nonstd  - partition directories do NOT follow Hive's key=value convention, one
 #                            partition is stored outside the table location, one partition holds the
 #                            NULL marker value (__HIVE_DEFAULT_PARTITION__), and one holds a data
-#                            file named the way Hive names them, without an extension.
+#                            file named the way Hive names them, without an extension. Its partitions
+#                            carry the zero statistics Hive records before any file is written.
 #   * duck_fixture_noparts - declares partition columns but has no partition registered at all.
 #   * duck_fixture_schema_mix - partition locations sort in the opposite order to the partitions, so
 #                            the first file under the table location belongs to the last partition.
@@ -91,6 +92,18 @@ SELECT p."PART_ID", 'numRows', '1000000'
   JOIN "DBS"  d ON d."DB_ID"  = t."DB_ID"
  WHERE d."NAME" = 'sample_db'
    AND t."TBL_NAME" = 'duck_fixture_hms_types'
+ON CONFLICT ("PART_ID", "PARAM_KEY") DO UPDATE SET "PARAM_VALUE" = EXCLUDED."PARAM_VALUE";
+
+-- The statistics Hive records for a partition registered before its files exist, and keeps after other writers
+-- add them: zero rows, bytes and files. They are stale, so the tests check they are not taken at face value.
+INSERT INTO "PARTITION_PARAMS" ("PART_ID", "PARAM_KEY", "PARAM_VALUE")
+SELECT p."PART_ID", k.key, '0'
+  FROM "PARTITIONS" p
+  JOIN "TBLS" t ON t."TBL_ID" = p."TBL_ID"
+  JOIN "DBS"  d ON d."DB_ID"  = t."DB_ID"
+ CROSS JOIN (VALUES ('numRows'), ('totalSize'), ('numFiles')) AS k(key)
+ WHERE d."NAME" = 'sample_db'
+   AND t."TBL_NAME" = 'duck_fixture_nonstd'
 ON CONFLICT ("PART_ID", "PARAM_KEY") DO UPDATE SET "PARAM_VALUE" = EXCLUDED."PARAM_VALUE";
 
 SELECT p."PART_NAME", v."INTEGER_IDX", v."PART_KEY_VAL", s."LOCATION"

@@ -167,7 +167,8 @@ static Value PartitionValue(const string &raw, const LogicalType &type, const st
 	return result;
 }
 
-//! A statistic from a partition's parameters: Hive's key, else the one Spark writes. Hive stores -1 when unknown.
+//! A statistic from a partition's parameters: Hive's key, else the one Spark writes. Hive stores -1 when unknown, and
+//! 0 for a partition registered before its files were written, which it does not notice: take neither.
 static optional_idx PartitionStatistic(const map<string, string> &parameters, const string &hive_key,
                                        const string &spark_key) {
 	for (auto &key : {hive_key, spark_key}) {
@@ -176,7 +177,7 @@ static optional_idx PartitionStatistic(const map<string, string> &parameters, co
 			continue;
 		}
 		int64_t value;
-		if (TryCast::Operation<string_t, int64_t>(string_t(entry->second), value) && value >= 0) {
+		if (TryCast::Operation<string_t, int64_t>(string_t(entry->second), value) && value > 0) {
 			return optional_idx(UnsafeNumericCast<idx_t>(value));
 		}
 	}
