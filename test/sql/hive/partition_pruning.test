@@ -45,17 +45,18 @@ SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'productio
 ----
 3
 
-# Only the two 'production' locations were listed or read: nothing under the 'staging' or NULL partitions
-query III
+# Only the two 'production' locations were listed or read: nothing under the 'staging', NULL or 'hivefile'
+# partitions. The scan takes its columns from the table, so planning opens no data file either.
+query IIII
 SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/production/%' ESCAPE '\') > 0,
        count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_outside%' ESCAPE '\'),
-       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/unknown%' ESCAPE '\')
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/unknown%' ESCAPE '\'),
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/hivefile%' ESCAPE '\')
 FROM duckdb_logs_parsed('HTTP');
 ----
-true	0	0
+true	0	0	0
 
-# A filter on the second partition column prunes as well. Binding the scan still lists the first partition to read
-# the Parquet schema from one of its files, so assert on the data files: a pruned partition is never read.
+# A filter on the second partition column prunes as well: no pruned partition is listed or read
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -64,10 +65,13 @@ SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE year = 2025;
 ----
 2
 
-query I
-SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%production/2024/data.parquet%') FROM duckdb_logs_parsed('HTTP');
+query III
+SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/production/2024%' ESCAPE '\'),
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_outside%' ESCAPE '\'),
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_nonstd/hivefile%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP');
 ----
-0
+0	0	0
 
 # Partition pruning on a table that does use key=value directories keeps working. Binding reads the schema from one
 # file, so compare a filtered scan against a full one rather than expecting no requests at all.

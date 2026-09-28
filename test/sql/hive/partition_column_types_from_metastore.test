@@ -1,0 +1,46 @@
+# name: test/sql/hive/partition_column_types_from_metastore.test
+# description: When a table's column types come from the metastore, files that store another type are cast to it
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_hms_types keeps every partition outside the table location, so no file is found there and the
+# columns come from the metastore: id BIGINT, label STRING.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# The files store id as INTEGER
+statement ok
+COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_hms_types') ORDER BY cid;
+----
+id	BIGINT
+label	VARCHAR
+batch	VARCHAR
+
+query TITT
+SELECT typeof(id), id, label, batch FROM hms.sample_db.duck_fixture_hms_types ORDER BY id;
+----
+BIGINT	1	x	a
+BIGINT	2	y	b
+
+query IT
+SELECT id, label FROM hms.sample_db.duck_fixture_hms_types WHERE id = 2;
+----
+2	y

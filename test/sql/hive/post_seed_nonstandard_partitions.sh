@@ -9,6 +9,11 @@ set -euo pipefail
 #                            NULL marker value (__HIVE_DEFAULT_PARTITION__), and one holds a data
 #                            file named the way Hive names them, without an extension.
 #   * duck_fixture_noparts - declares partition columns but has no partition registered at all.
+#   * duck_fixture_schema_mix - partition locations sort in the opposite order to the partitions, so
+#                            the first file under the table location belongs to the last partition.
+#                            The tests give its files different column orders and column sets.
+#   * duck_fixture_hms_types - every partition lives outside the table location, so the column types
+#                            come from the metastore rather than from a data file.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -39,6 +44,25 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_noparts (review_id IN
   PARTITIONED BY (region STRING)
   STORED AS PARQUET
   LOCATION 's3a://test-bucket/duck_fixture_noparts';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_schema_mix (id INT, amount INT)
+  PARTITIONED BY (batch STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_schema_mix';
+
+ALTER TABLE sample_db.duck_fixture_schema_mix ADD IF NOT EXISTS
+  PARTITION (batch='a') LOCATION 's3a://test-bucket/duck_fixture_schema_mix/z_dir'
+  PARTITION (batch='b') LOCATION 's3a://test-bucket/duck_fixture_schema_mix/y_dir'
+  PARTITION (batch='c') LOCATION 's3a://test-bucket/duck_fixture_schema_mix/a_dir';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_hms_types (id BIGINT, label STRING)
+  PARTITIONED BY (batch STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_hms_types';
+
+ALTER TABLE sample_db.duck_fixture_hms_types ADD IF NOT EXISTS
+  PARTITION (batch='a') LOCATION 's3a://test-bucket/duck_fixture_hms_types_data/a'
+  PARTITION (batch='b') LOCATION 's3a://test-bucket/duck_fixture_hms_types_data/b';
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it
