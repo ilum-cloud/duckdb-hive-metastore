@@ -7,6 +7,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -150,18 +151,22 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 	return make_uniq<HMSPartitionFileList>(context_p, plan, std::move(kept));
 }
 
-HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p) : plan(std::move(plan_p)) {
+HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
+                                       vector<LogicalType> column_types_p)
+    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)) {
+	D_ASSERT(column_names.size() == column_types.size());
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::CreateInstance(const TableFunction &table_function) {
 	if (!table_function.function_info) {
 		throw InternalException("HMSMultiFileReader: the scan function carries no partition plan");
 	}
-	return make_uniq<HMSMultiFileReader>(table_function.function_info->Cast<HMSScanFunctionInfo>().plan);
+	auto &info = table_function.function_info->Cast<HMSScanFunctionInfo>();
+	return make_uniq<HMSMultiFileReader>(info.plan, info.column_names, info.column_types);
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::Copy() const {
-	return make_uniq<HMSMultiFileReader>(plan);
+	return make_uniq<HMSMultiFileReader>(plan, column_names, column_types);
 }
 
 shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,
@@ -176,6 +181,25 @@ shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &cont
 	return make_shared_ptr<HMSPartitionFileList>(context, plan, std::move(partition_indexes));
 }
 
+bool HMSMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
+                              vector<string> &names, MultiFileReaderBindData &bind_data) {
+	// Produce the columns of the table entry, not those of whichever file happens to come first. The catalog hands
+	// columns to the scan by position, and the entry's list comes from elsewhere (one file under the table location,
+	// or the metastore), so binding on a data file can shift every column when files differ in order or content.
+	// Each file is matched to these columns by name instead. A column a file does not have reads as NULL, which is
+	// what Hive does for files written before ALTER TABLE ... ADD COLUMNS. Partition columns are part of the list;
+	// FinalizeBind fills them with constants, so they are never looked up in a file.
+	for (idx_t i = 0; i < column_names.size(); i++) {
+		auto column = MultiFileColumnDefinition::CreateFromNameAndType(column_names[i], column_types[i]);
+		column.default_expression = make_uniq<ConstantExpression>(Value(column_types[i]));
+		bind_data.schema.push_back(std::move(column));
+		names.push_back(column_names[i]);
+		return_types.push_back(column_types[i]);
+	}
+	bind_data.mapping = MultiFileColumnMappingMode::BY_NAME;
+	return true;
+}
+
 void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
                                      vector<string> &names, MultiFileReaderBindData &bind_data) {
 	// Partition values come from the metastore (or, in path mode, from this reader), never from DuckDB's hive
@@ -184,22 +208,6 @@ void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &f
 	options.hive_partitioning = false;
 	options.hive_types_schema.clear();
 	MultiFileReader::BindOptions(options, files, return_types, names, bind_data);
-
-	// The partition columns are not in the data files, so add them here, in the order the metastore declares them
-	for (idx_t i = 0; i < plan->names.size(); i++) {
-		bool found = false;
-		for (idx_t col = 0; col < names.size(); col++) {
-			if (StringUtil::CIEquals(names[col], plan->names[i])) {
-				return_types[col] = plan->types[i];
-				found = true;
-				break;
-			}
-		}
-		if (!found) {
-			names.push_back(plan->names[i]);
-			return_types.push_back(plan->types[i]);
-		}
-	}
 }
 
 vector<Value> HMSMultiFileReader::ValuesForFile(ClientContext &context, const BaseFileReader &reader) const {

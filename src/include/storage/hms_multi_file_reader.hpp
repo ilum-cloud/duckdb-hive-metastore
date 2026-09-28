@@ -18,12 +18,17 @@ namespace duckdb {
 //! Key under which a file carries the partition it belongs to (an index into HMSPartitionPlan::partitions)
 static constexpr const char *HMS_PARTITION_INDEX_KEY = "hms_partition_index";
 
-//! Carries the partition plan from the table entry to the multi-file reader DuckDB creates while binding the scan
+//! Carries what the multi-file reader DuckDB creates while binding the scan needs from the table entry: the partition
+//! plan, and the entry's columns, which the scan must produce in exactly that order
 struct HMSScanFunctionInfo : public TableFunctionInfo {
-	explicit HMSScanFunctionInfo(shared_ptr<const HMSPartitionPlan> plan_p) : plan(std::move(plan_p)) {
+	HMSScanFunctionInfo(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
+	                    vector<LogicalType> column_types_p)
+	    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)) {
 	}
 
 	shared_ptr<const HMSPartitionPlan> plan;
+	vector<string> column_names;
+	vector<LogicalType> column_types;
 };
 
 //! The files of one partitioned table, one partition at a time. Each partition is globbed at its own location, so
@@ -53,16 +58,20 @@ private:
 };
 
 //! Scans a partitioned Hive Metastore table: takes the files from the partition locations the metastore records and
-//! fills the partition columns with the values it records for them. It is grafted onto the regular Parquet scan, so
-//! reading, the metadata cache and filter pushdown stay the stock implementations.
+//! fills the partition columns with the values it records for them. The scan produces the columns of the table entry,
+//! and every file is matched to them by name. It is grafted onto the regular Parquet scan, so reading, the metadata
+//! cache and filter pushdown stay the stock implementations.
 class HMSMultiFileReader : public MultiFileReader {
 public:
-	explicit HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan);
+	HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan, vector<string> column_names,
+	                   vector<LogicalType> column_types);
 
 	static unique_ptr<MultiFileReader> CreateInstance(const TableFunction &table_function);
 
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, const vector<string> &paths,
 	                                         const FileGlobInput &glob_input) override;
+	bool Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types, vector<string> &names,
+	          MultiFileReaderBindData &bind_data) override;
 	void BindOptions(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
 	                 vector<string> &names, MultiFileReaderBindData &bind_data) override;
 	void FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
@@ -76,6 +85,9 @@ private:
 	vector<Value> ValuesForFile(ClientContext &context, const BaseFileReader &reader) const;
 
 	shared_ptr<const HMSPartitionPlan> plan;
+	//! The columns of the table entry, partition columns included, in the entry's order
+	vector<string> column_names;
+	vector<LogicalType> column_types;
 };
 
 } // namespace duckdb

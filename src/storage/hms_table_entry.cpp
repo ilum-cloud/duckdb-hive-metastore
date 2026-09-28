@@ -427,7 +427,15 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 			context.db->config.SetOption("s3_use_ssl", use_ssl_val);
 			context.db->config.SetOption("s3_url_style", url_style_val);
 		}
-		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(partition_plan);
+		// The scan must produce exactly this entry's columns: the catalog maps them to the scan by position
+		vector<string> column_names;
+		vector<LogicalType> column_types;
+		for (auto &column : GetColumns().Logical()) {
+			column_names.push_back(column.Name());
+			column_types.push_back(column.Type());
+		}
+		scan_function.function_info =
+		    make_shared_ptr<HMSScanFunctionInfo>(partition_plan, std::move(column_names), std::move(column_types));
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 	}
 
