@@ -15,6 +15,11 @@ require parquet
 # Disable skipping of HTTP errors to see actual failure messages
 set ignore_error_messages
 
+# The iceberg extension loads avro when it starts and cannot install it on its own here, so install it first, as the
+# iceberg tests do
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
 statement ok
 INSTALL iceberg; LOAD iceberg;
 
