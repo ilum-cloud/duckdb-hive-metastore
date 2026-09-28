@@ -1,0 +1,70 @@
+# name: test/sql/hive/partition_row_estimate.test
+# description: The planner's row estimate for a partitioned scan comes from the metastore's statistics, else from the file sizes, and is never 0 when there is data
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_hms_types has a row count of 1,000,000 recorded for each partition; duck_fixture_nonstd has no
+# statistics at all.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10), (2, 20)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 30)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/production/2025/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40), (5, 50)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_outside/staging_2024/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (6, 60)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/unknown/2025/data.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/hivefile/2026/000000_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# The metastore's row counts win over the files, which hold one row each, and follow partition pruning
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_hms_types;
+----
+physical_plan	<REGEX>:.*~2,000,000 rows.*
+
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_hms_types WHERE batch = 'a';
+----
+physical_plan	<REGEX>:.*~1,000,000 rows.*
+
+# Without statistics the estimate comes from the file sizes. A scan left with a single file is not estimated at 0
+# rows, which is what DuckDB would report, as the scan opens no file while planning.
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'staging' AND year = 2024;
+----
+2
+
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'staging' AND year = 2024;
+----
+physical_plan	<!REGEX>:.*~0 rows.*
+
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'staging' AND year = 2024;
+----
+physical_plan	<REGEX>:.*~[1-9][0-9,]* rows.*

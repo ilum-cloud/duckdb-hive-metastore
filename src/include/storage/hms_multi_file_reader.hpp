@@ -45,6 +45,8 @@ public:
 	                                                vector<unique_ptr<Expression>> &filters) const override;
 	//! Shows the partition locations rather than every expanded file
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
+	//! Estimates the rows left to scan from the metastore's statistics, or from the sizes of the data files
+	unique_ptr<NodeStatistics> GetCardinality(ClientContext &context) const override;
 
 protected:
 	bool ExpandNextPath() const override;

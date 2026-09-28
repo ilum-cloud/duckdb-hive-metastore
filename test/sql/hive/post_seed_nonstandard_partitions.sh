@@ -13,7 +13,8 @@ set -euo pipefail
 #                            the first file under the table location belongs to the last partition.
 #                            The tests give its files different column orders and column sets.
 #   * duck_fixture_hms_types - every partition lives outside the table location, so the column types
-#                            come from the metastore rather than from a data file.
+#                            come from the metastore rather than from a data file. Its partitions carry
+#                            a row count, as Hive records after gathering statistics.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -80,6 +81,17 @@ UPDATE "PARTITION_KEY_VALS" v
    AND t."TBL_NAME" = 'duck_fixture_nonstd'
    AND v."INTEGER_IDX" = 0
    AND v."PART_KEY_VAL" = 'unknown';
+
+-- Row counts as Hive records them after gathering statistics, so the planner's estimate can come from the
+-- metastore. The files the tests write hold far fewer rows, which is what tells the two sources apart.
+INSERT INTO "PARTITION_PARAMS" ("PART_ID", "PARAM_KEY", "PARAM_VALUE")
+SELECT p."PART_ID", 'numRows', '1000000'
+  FROM "PARTITIONS" p
+  JOIN "TBLS" t ON t."TBL_ID" = p."TBL_ID"
+  JOIN "DBS"  d ON d."DB_ID"  = t."DB_ID"
+ WHERE d."NAME" = 'sample_db'
+   AND t."TBL_NAME" = 'duck_fixture_hms_types'
+ON CONFLICT ("PART_ID", "PARAM_KEY") DO UPDATE SET "PARAM_VALUE" = EXCLUDED."PARAM_VALUE";
 
 SELECT p."PART_NAME", v."INTEGER_IDX", v."PART_KEY_VAL", s."LOCATION"
   FROM "PARTITIONS" p
