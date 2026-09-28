@@ -89,6 +89,8 @@ private:
 	shared_ptr<const HMSPartitionPlan> partition_plan;
 	std::chrono::steady_clock::time_point partition_plan_loaded_at;
 	idx_t partition_plan_generation = 0;
+	//! Whether falling back to the table location for lack of registered partitions was already reported
+	bool warned_no_partitions = false;
 };
 
 } // namespace duckdb

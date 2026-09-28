@@ -167,11 +167,10 @@ static Value PartitionValue(const string &raw, const LogicalType &type, const st
 	return result;
 }
 
-//! A statistic from a partition's parameters: Hive's key, else the one Spark writes. Hive stores -1 when unknown, and
-//! 0 for a partition registered before its files were written, which it does not notice: take neither.
-static optional_idx PartitionStatistic(const map<string, string> &parameters, const string &hive_key,
-                                       const string &spark_key) {
-	for (auto &key : {hive_key, spark_key}) {
+//! A statistic from a partition's parameters, under the first of the keys present. Hive stores -1 when unknown, and 0
+//! for a partition registered before its files were written, which it does not notice: take neither.
+static optional_idx PartitionStatistic(const map<string, string> &parameters, const vector<string> &keys) {
+	for (auto &key : keys) {
 		auto entry = parameters.find(key);
 		if (entry == parameters.end()) {
 			continue;
@@ -238,6 +237,9 @@ shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext
 			// rewriting and the http endpoint handling
 			auto path_result = hms::PathUtils::NormalizeScanPath(partition.location, *table_data, format);
 			scan_partition.location = path_result.scan_path;
+			while (StringUtil::EndsWith(scan_partition.location, "/")) {
+				scan_partition.location.pop_back();
+			}
 			scan_partition.scan_location = hms::PathUtils::BuildPartitionGlobPattern(path_result.scan_path, format);
 			scan_partition.fallback_scan_location =
 			    hms::PathUtils::BuildPartitionFallbackGlobPattern(path_result.scan_path);
@@ -246,9 +248,10 @@ shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext
 				plan->s3_endpoint = path_result.s3_endpoint;
 			}
 			scan_partition.row_count =
-			    PartitionStatistic(partition.parameters, "numRows", "spark.sql.statistics.numRows");
+			    PartitionStatistic(partition.parameters, {"numRows", "spark.sql.statistics.numRows"});
 			scan_partition.total_size =
-			    PartitionStatistic(partition.parameters, "totalSize", "spark.sql.statistics.totalSize");
+			    PartitionStatistic(partition.parameters, {"totalSize", "spark.sql.statistics.totalSize"});
+			scan_partition.file_count = PartitionStatistic(partition.parameters, {"numFiles"});
 			for (idx_t i = 0; i < table_data->partition_keys.size(); i++) {
 				scan_partition.values.push_back(
 				    PartitionValue(partition.values[i], plan->types[i], plan->names[i], scan_partition.name, name));
@@ -257,6 +260,31 @@ shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext
 		}
 		if (!plan->partitions.empty()) {
 			plan->source = HMSPartitionSource::HMS;
+		}
+		// What deciding how to list the partitions takes: which of them live under the table location, how many
+		// files those hold, and which partitions sit at each location
+		plan->table_location =
+		    hms::PathUtils::NormalizeScanPath(table_data->storage_location, *table_data, format).scan_path;
+		while (StringUtil::EndsWith(plan->table_location, "/")) {
+			plan->table_location.pop_back();
+		}
+		idx_t files_under_table_location = 0;
+		bool file_counts_known = true;
+		for (idx_t i = 0; i < plan->partitions.size(); i++) {
+			auto &scan_partition = plan->partitions[i];
+			plan->partitions_by_location[scan_partition.location].push_back(i);
+			if (!plan->IsUnderTableLocation(scan_partition)) {
+				continue;
+			}
+			plan->partitions_under_table_location++;
+			if (scan_partition.file_count.IsValid()) {
+				files_under_table_location += scan_partition.file_count.GetIndex();
+			} else {
+				file_counts_known = false;
+			}
+		}
+		if (file_counts_known) {
+			plan->files_under_table_location = files_under_table_location;
 		}
 	}
 
@@ -267,6 +295,14 @@ shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext
 	}
 
 	lock_guard<mutex> guard(partition_lock);
+	if (mode == HMSPartitionMode::AUTO && plan->source == HMSPartitionSource::PATH && !warned_no_partitions) {
+		warned_no_partitions = true;
+		DUCKDB_LOG_WARNING(context,
+		                   "hive_metastore: table \"%s.%s\" declares partition columns but has no partition registered "
+		                   "in the Hive Metastore; reading every file under its location, with the partition values "
+		                   "of key=value directory names, else those the files hold",
+		                   schema.name, name);
+	}
 	partition_plan = std::move(plan);
 	partition_plan_loaded_at = std::chrono::steady_clock::now();
 	partition_plan_generation = generation;
