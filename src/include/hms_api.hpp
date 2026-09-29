@@ -41,6 +41,8 @@ struct HMSAPIPartition {
 	vector<string> values;
 	//! The partition's own storage location, which may be anywhere
 	string location;
+	//! Partition parameters, including the statistics Hive and Spark record (numRows, totalSize)
+	map<string, string> parameters;
 };
 
 class HMSAPI {

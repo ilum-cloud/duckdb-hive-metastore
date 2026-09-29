@@ -171,6 +171,9 @@ A partitioned table is read through the partitions registered in the metastore:
 - **Filters on partition columns still skip files.** A filter that cannot match a partition's values drops that
   partition before its location is even listed.
 - **Data files written by Hive are picked up too**, including the extension-less names Hive gives them (`000000_0`).
+- **Files are matched to the table's columns by name.** Partitions whose files store the columns in another order, or
+  that were written before an `ALTER TABLE ... ADD COLUMNS` and lack the new column, read correctly; the missing column
+  is `NULL` for their rows.
 - **Partition columns come last, in the order the metastore declares them.** For a table partitioned by
   `(year, month, region)` the columns end with `year, month, region`, which is the order Hive and Spark report.
 - The partition list is fetched the first time a table is scanned, never while listing or resolving tables, and is

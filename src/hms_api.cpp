@@ -136,6 +136,7 @@ vector<HMSAPIPartition> HMSAPI::GetPartitions(ClientContext &ctx, const string &
 			HMSAPIPartition converted;
 			converted.values = vector<string>(partition.values.begin(), partition.values.end());
 			converted.location = partition.sd.location;
+			converted.parameters = partition.parameters;
 			result.push_back(std::move(converted));
 		}
 	}

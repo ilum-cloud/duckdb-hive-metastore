@@ -14,6 +14,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "hms_utils.hpp"
 
@@ -166,6 +167,23 @@ static Value PartitionValue(const string &raw, const LogicalType &type, const st
 	return result;
 }
 
+//! A statistic from a partition's parameters: Hive's key, else the one Spark writes. Hive stores -1 when unknown, and
+//! 0 for a partition registered before its files were written, which it does not notice: take neither.
+static optional_idx PartitionStatistic(const map<string, string> &parameters, const string &hive_key,
+                                       const string &spark_key) {
+	for (auto &key : {hive_key, spark_key}) {
+		auto entry = parameters.find(key);
+		if (entry == parameters.end()) {
+			continue;
+		}
+		int64_t value;
+		if (TryCast::Operation<string_t, int64_t>(string_t(entry->second), value) && value > 0) {
+			return optional_idx(UnsafeNumericCast<idx_t>(value));
+		}
+	}
+	return optional_idx();
+}
+
 shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext &context) {
 	auto &hms_catalog = catalog.Cast<HMSCatalog>();
 	auto generation = hms_catalog.GetCacheGeneration();
@@ -227,6 +245,10 @@ shared_ptr<const HMSPartitionPlan> HMSTableEntry::GetPartitionPlan(ClientContext
 				plan->needs_s3_config = true;
 				plan->s3_endpoint = path_result.s3_endpoint;
 			}
+			scan_partition.row_count =
+			    PartitionStatistic(partition.parameters, "numRows", "spark.sql.statistics.numRows");
+			scan_partition.total_size =
+			    PartitionStatistic(partition.parameters, "totalSize", "spark.sql.statistics.totalSize");
 			for (idx_t i = 0; i < table_data->partition_keys.size(); i++) {
 				scan_partition.values.push_back(
 				    PartitionValue(partition.values[i], plan->types[i], plan->names[i], scan_partition.name, name));
@@ -427,7 +449,15 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 			context.db->config.SetOption("s3_use_ssl", use_ssl_val);
 			context.db->config.SetOption("s3_url_style", url_style_val);
 		}
-		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(partition_plan);
+		// The scan must produce exactly this entry's columns: the catalog maps them to the scan by position
+		vector<string> column_names;
+		vector<LogicalType> column_types;
+		for (auto &column : GetColumns().Logical()) {
+			column_names.push_back(column.Name());
+			column_types.push_back(column.Type());
+		}
+		scan_function.function_info =
+		    make_shared_ptr<HMSScanFunctionInfo>(partition_plan, std::move(column_names), std::move(column_types));
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 	}
 

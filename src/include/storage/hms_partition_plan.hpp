@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector.hpp"
 
@@ -33,6 +34,9 @@ struct HMSScanPartition {
 	string fallback_scan_location;
 	//! One value per partition column, already cast to the metastore type
 	vector<Value> values;
+	//! Statistics the metastore holds for the partition, if any: row count and size in bytes
+	optional_idx row_count;
+	optional_idx total_size;
 };
 
 //! How a scan of a partitioned table locates its files and fills its partition columns. Built once per table entry

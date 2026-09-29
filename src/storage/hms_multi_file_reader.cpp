@@ -7,11 +7,19 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
 namespace duckdb {
+
+//! How many files to list for a row estimate when the metastore has no statistics (DuckDB uses the same for globs)
+static constexpr idx_t ESTIMATE_FILE_COUNT = 500;
+//! The bytes per row DuckDB assumes for Parquet files it has not opened
+static constexpr idx_t ESTIMATED_BYTES_PER_ROW = 10;
+//! The rows per file DuckDB assumes at least, used when not even the file sizes are known
+static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
 
 HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<const HMSPartitionPlan> plan_p,
                                            vector<idx_t> partition_indexes_p)
@@ -60,6 +68,68 @@ vector<OpenFileInfo> HMSPartitionFileList::GetDisplayFileList(optional_idx max_f
 		result.emplace_back(plan->partitions[partition_index].scan_location);
 	}
 	return result;
+}
+
+unique_ptr<NodeStatistics> HMSPartitionFileList::GetCardinality(ClientContext &context_p) const {
+	// The scan binds to the table's columns without opening a data file, so DuckDB has no file to estimate from: it
+	// would report 0 rows for a single file. Estimate here instead, first from the statistics the metastore holds
+	// for the partitions left to scan (Hive records the row count, Hive and Spark the size in bytes)
+	idx_t row_count = 0;
+	idx_t total_size = 0;
+	bool all_row_counts = true;
+	bool all_sizes = true;
+	for (auto partition_index : partition_indexes) {
+		auto &partition = plan->partitions[partition_index];
+		if (partition.row_count.IsValid()) {
+			row_count += partition.row_count.GetIndex();
+		} else {
+			all_row_counts = false;
+		}
+		if (partition.total_size.IsValid()) {
+			total_size += partition.total_size.GetIndex();
+		} else {
+			all_sizes = false;
+		}
+	}
+	if (all_row_counts) {
+		return make_uniq<NodeStatistics>(row_count);
+	}
+	idx_t file_count = 0;
+	if (!all_sizes) {
+		// No statistics: size up the data files instead. List partitions until enough files are known, as DuckDB
+		// does for its own globs (the listed files are kept for the scan), and extrapolate to the rest.
+		GetFileCount(ESTIMATE_FILE_COUNT);
+		lock_guard<mutex> guard(lock);
+		total_size = 0;
+		bool all_file_sizes = true;
+		for (auto &file : expanded_files) {
+			if (!file.extended_info) {
+				all_file_sizes = false;
+				break;
+			}
+			auto &options = file.extended_info->options;
+			auto entry = options.find("file_size");
+			if (entry == options.end()) {
+				all_file_sizes = false;
+				break;
+			}
+			total_size += entry->second.GetValue<uint64_t>();
+		}
+		file_count = expanded_files.size();
+		if (next_partition > 0 && next_partition < partition_indexes.size()) {
+			total_size = total_size * partition_indexes.size() / next_partition;
+			file_count = file_count * partition_indexes.size() / next_partition;
+		}
+		if (!all_file_sizes) {
+			return make_uniq<NodeStatistics>(file_count * MIN_ROWS_PER_FILE);
+		}
+	}
+	// The same assumption DuckDB makes for Parquet files it has not opened
+	auto estimate = total_size / ESTIMATED_BYTES_PER_ROW;
+	if (estimate == 0 && (total_size > 0 || file_count > 0)) {
+		estimate = 1;
+	}
+	return make_uniq<NodeStatistics>(estimate);
 }
 
 // Replaces references to partition columns with the value this partition has for them, so the filter can be folded
@@ -150,18 +220,22 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 	return make_uniq<HMSPartitionFileList>(context_p, plan, std::move(kept));
 }
 
-HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p) : plan(std::move(plan_p)) {
+HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
+                                       vector<LogicalType> column_types_p)
+    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)) {
+	D_ASSERT(column_names.size() == column_types.size());
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::CreateInstance(const TableFunction &table_function) {
 	if (!table_function.function_info) {
 		throw InternalException("HMSMultiFileReader: the scan function carries no partition plan");
 	}
-	return make_uniq<HMSMultiFileReader>(table_function.function_info->Cast<HMSScanFunctionInfo>().plan);
+	auto &info = table_function.function_info->Cast<HMSScanFunctionInfo>();
+	return make_uniq<HMSMultiFileReader>(info.plan, info.column_names, info.column_types);
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::Copy() const {
-	return make_uniq<HMSMultiFileReader>(plan);
+	return make_uniq<HMSMultiFileReader>(plan, column_names, column_types);
 }
 
 shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,
@@ -176,6 +250,25 @@ shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &cont
 	return make_shared_ptr<HMSPartitionFileList>(context, plan, std::move(partition_indexes));
 }
 
+bool HMSMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
+                              vector<string> &names, MultiFileReaderBindData &bind_data) {
+	// Produce the columns of the table entry, not those of whichever file happens to come first. The catalog hands
+	// columns to the scan by position, and the entry's list comes from elsewhere (one file under the table location,
+	// or the metastore), so binding on a data file can shift every column when files differ in order or content.
+	// Each file is matched to these columns by name instead. A column a file does not have reads as NULL, which is
+	// what Hive does for files written before ALTER TABLE ... ADD COLUMNS. Partition columns are part of the list;
+	// FinalizeBind fills them with constants, so they are never looked up in a file.
+	for (idx_t i = 0; i < column_names.size(); i++) {
+		auto column = MultiFileColumnDefinition::CreateFromNameAndType(column_names[i], column_types[i]);
+		column.default_expression = make_uniq<ConstantExpression>(Value(column_types[i]));
+		bind_data.schema.push_back(std::move(column));
+		names.push_back(column_names[i]);
+		return_types.push_back(column_types[i]);
+	}
+	bind_data.mapping = MultiFileColumnMappingMode::BY_NAME;
+	return true;
+}
+
 void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
                                      vector<string> &names, MultiFileReaderBindData &bind_data) {
 	// Partition values come from the metastore (or, in path mode, from this reader), never from DuckDB's hive
@@ -184,22 +277,6 @@ void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &f
 	options.hive_partitioning = false;
 	options.hive_types_schema.clear();
 	MultiFileReader::BindOptions(options, files, return_types, names, bind_data);
-
-	// The partition columns are not in the data files, so add them here, in the order the metastore declares them
-	for (idx_t i = 0; i < plan->names.size(); i++) {
-		bool found = false;
-		for (idx_t col = 0; col < names.size(); col++) {
-			if (StringUtil::CIEquals(names[col], plan->names[i])) {
-				return_types[col] = plan->types[i];
-				found = true;
-				break;
-			}
-		}
-		if (!found) {
-			names.push_back(plan->names[i]);
-			return_types.push_back(plan->types[i]);
-		}
-	}
 }
 
 vector<Value> HMSMultiFileReader::ValuesForFile(ClientContext &context, const BaseFileReader &reader) const {

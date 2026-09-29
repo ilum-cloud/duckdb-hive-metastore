@@ -1,0 +1,52 @@
+# name: test/sql/hive/partition_file_extra_column.test
+# description: A column some partition files have but the table does not is skipped, and the table's columns stay in place
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# In duck_fixture_schema_mix the first file under the table location (a_dir) belongs to the last partition (batch c),
+# so the file the table's columns are read from is not the first file of the first partition.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# The table's columns come from this file: (id, amount)
+statement ok
+COPY (SELECT 3 AS id, 300 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/a_dir/data.parquet';
+
+# The other partitions carry an extra column, in the middle
+statement ok
+COPY (SELECT 1 AS id, 'old' AS note, 100 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/z_dir/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id, 'old' AS note, 200 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/y_dir/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_schema_mix') ORDER BY cid;
+----
+id	INTEGER
+amount	INTEGER
+batch	VARCHAR
+
+query IIT
+SELECT id, amount, batch FROM hms.sample_db.duck_fixture_schema_mix ORDER BY id;
+----
+1	100	a
+2	200	b
+3	300	c
+
+query IT
+SELECT amount, batch FROM hms.sample_db.duck_fixture_schema_mix WHERE batch <> 'c' ORDER BY amount;
+----
+100	a
+200	b
