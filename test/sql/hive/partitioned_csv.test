@@ -1,0 +1,76 @@
+# name: test/sql/hive/partitioned_csv.test
+# description: A partitioned text (CSV) table is read through its registered partitions, like a Parquet one
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_csv_parts: comma separated text, partitioned by (region, year), directories not named key=value, and
+# the 'apac' partition outside the table location.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# Named the way Hive names its data files
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'alice'), (2, 'bob')) t(id, name)) TO 's3://test-bucket/duck_fixture_csv_parts/eu/2024/000000_0' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 'carol')) t(id, name)) TO 's3://test-bucket/duck_fixture_csv_parts/us/2024/000000_0' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 'dave')) t(id, name)) TO 's3://test-bucket/duck_fixture_csv_elsewhere/apac_2025/000000_0' (FORMAT csv, HEADER false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+# The partition columns come last, with the metastore's types
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_csv_parts') ORDER BY cid;
+----
+id	INTEGER
+name	VARCHAR
+region	VARCHAR
+year	INTEGER
+
+# Every partition is read at its own location, with the values the metastore records
+query ITTI
+SELECT * FROM hms.sample_db.duck_fixture_csv_parts ORDER BY id;
+----
+1	alice	eu	2024
+2	bob	eu	2024
+3	carol	us	2024
+4	dave	apac	2025
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# A filter on a partition column skips the other partitions
+query ITTI
+SELECT * FROM hms.sample_db.duck_fixture_csv_parts WHERE region = 'apac';
+----
+4	dave	apac	2025
+
+query II
+SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_csv\_parts/eu%' ESCAPE '\'),
+       count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_csv\_parts/us%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP');
+----
+0	0
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_csv_parts WHERE year = 2024;
+----
+3
+
+statement ok
+CALL disable_logging();

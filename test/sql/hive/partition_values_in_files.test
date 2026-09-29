@@ -30,6 +30,9 @@ statement ok
 COPY (SELECT 4 AS id, 'zz' AS region) TO 's3://test-bucket/duck_fixture_values_in_files/region=apac/data.parquet';
 
 statement ok
+COPY (SELECT 5 AS id) TO 's3://test-bucket/duck_fixture_values_in_files/region=emea/data.parquet';
+
+statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
 statement ok
@@ -42,6 +45,7 @@ SELECT id, region FROM hms.sample_db.duck_fixture_values_in_files ORDER BY id;
 2	us
 3	NULL
 4	apac
+5	emea
 
 query I
 SELECT id FROM hms.sample_db.duck_fixture_values_in_files WHERE region = 'us';
