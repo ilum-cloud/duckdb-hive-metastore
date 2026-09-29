@@ -170,6 +170,12 @@ A partitioned table is read through the partitions registered in the metastore:
   regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
 - **Filters on partition columns still skip files.** A filter that cannot match a partition's values drops that
   partition before its location is even listed.
+- **Only registered partitions are read.** Directories under the table location that no partition points at are
+  skipped, and a file belongs to the partition at the deepest location containing it, so a partition nested inside
+  another's location is not read twice.
+- **Listing stays cheap.** When a query reads most of the partitions under the table location (or, if the metastore
+  records how many files they hold, whenever it takes fewer requests), that location is listed once, at a request
+  per thousand files, instead of a request per partition.
 - **Data files written by Hive are picked up too**, including the extension-less names Hive gives them (`000000_0`).
 - **Files are matched to the table's columns by name.** Partitions whose files store the columns in another order, or
   that were written before an `ALTER TABLE ... ADD COLUMNS` and lack the new column, read correctly; the missing column
@@ -183,7 +189,7 @@ A partitioned table is read through the partitions registered in the metastore:
 
 | Value | Behavior |
 |---|---|
-| `auto` (default) | Use the registered partitions; fall back to globbing the table location when a table has none |
+| `auto` (default) | Use the registered partitions; when a table has none, glob the table location, take partition values from `key=value` directory names, else from the columns of that name in the files, and log a warning |
 | `hms` | Always use the registered partitions; fail if a partitioned table has none |
 | `path` | Never read the partition list: glob the table location and take partition values from `key=value` directory names |
 

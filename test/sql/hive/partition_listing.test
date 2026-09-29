@@ -1,0 +1,76 @@
+# name: test/sql/hive/partition_listing.test
+# description: Partitions under the table location are listed together when most of them are read, one by one otherwise, and each file belongs to the deepest partition that contains it
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# In duck_fixture_nested the partition 'inner' lives inside the location of the partition 'outer'.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_fixture_nested/outer/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO 's3://test-bucket/duck_fixture_nested/outer/inner/data.parquet';
+
+# A directory under the table location that no partition points at: never read
+statement ok
+COPY (SELECT 99 AS id) TO 's3://test-bucket/duck_fixture_nested/stray/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+# Resolve the table first, so only the scans below are counted
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_nested;
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Reading every partition: one listing of the table location. Each file is read once, for the deepest partition
+# containing it, and the stray directory is skipped.
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested ORDER BY id;
+----
+1	outer
+2	inner
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+1
+
+# Reading one partition: only its own location is listed, and the file of the partition nested in it is not
+# attributed to it
+statement ok
+CALL truncate_duckdb_logs();
+
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested WHERE part = 'outer';
+----
+1	outer
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%' AND url_decode(request.url) NOT LIKE '%prefix=duck\_fixture\_nested/outer/%' ESCAPE '\';
+----
+0
+
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested WHERE part = 'inner';
+----
+2	inner
+
+statement ok
+CALL disable_logging();

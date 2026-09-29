@@ -52,11 +52,28 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
+	//! Lists the partitions under the table location together, with one listing of that location, when that takes
+	//! fewer requests than listing them one by one
+	void ListTogetherIfCheaper() const;
+	//! The data files of one partition, from its own listing
+	vector<OpenFileInfo> ListPartition(idx_t partition_index) const;
+	//! Whether a file belongs to a partition: it does to the partitions at the deepest location containing it
+	bool BelongsTo(const string &path, idx_t partition_index) const;
+	//! The partitions at the deepest location containing a file, or nullptr if no partition contains it
+	optional_ptr<const vector<idx_t>> PartitionsOwning(const string &path) const;
+	//! Keeps the files that match the partition's pattern, else the permissive one, as its two listings would
+	vector<OpenFileInfo> SelectDataFiles(const HMSScanPartition &partition, vector<OpenFileInfo> files) const;
+
 	ClientContext &context;
 	shared_ptr<const HMSPartitionPlan> plan;
 	//! The partitions still to scan, as indexes into plan->partitions
 	vector<idx_t> partition_indexes;
 	mutable idx_t next_partition = 0;
+	mutable bool listing_decided = false;
+	//! When the partitions under the table location were listed together: the files of each, by position in
+	//! partition_indexes, and which positions were listed that way
+	mutable vector<vector<OpenFileInfo>> listed_together;
+	mutable vector<bool> is_listed_together;
 };
 
 //! Scans a partitioned Hive Metastore table: takes the files from the partition locations the metastore records and
@@ -83,8 +100,9 @@ public:
 	unique_ptr<MultiFileReader> Copy() const override;
 
 private:
-	//! The partition values for one file, in plan->names order
-	vector<Value> ValuesForFile(ClientContext &context, const BaseFileReader &reader) const;
+	//! The partition values for one file, in plan->names order. A value the file's path does not carry is not
+	//! present: the column is then read from the file itself.
+	vector<Value> ValuesForFile(ClientContext &context, const BaseFileReader &reader, vector<bool> &present) const;
 
 	shared_ptr<const HMSPartitionPlan> plan;
 	//! The columns of the table entry, partition columns included, in the entry's order
