@@ -133,9 +133,9 @@ bool HMSTableEntry::HasSameColumns(const HMSTableEntry &other) const {
 }
 
 bool HMSTableEntry::InjectsPartitionColumns(const HMSAPITable &table, const hms::FormatDetectionResult &format) {
-	// Delta and Iceberg keep their own partition metadata and are read by their own extensions. CSV and Avro are not
-	// covered yet: their partition columns are missing today as well, and their scans need separate work.
-	return !table.partition_keys.empty() && !format.IsDelta() && !format.IsIceberg() && format.IsParquet();
+	// Delta and Iceberg keep their own partition metadata and are read by their own extensions
+	return !table.partition_keys.empty() && !format.IsDelta() && !format.IsIceberg() &&
+	       (format.IsParquet() || format.IsCSV() || format.IsAvro());
 }
 
 //! The name the metastore uses for a partition, rebuilt from the partition keys and values
@@ -492,8 +492,12 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 			column_names.push_back(column.Name());
 			column_types.push_back(column.Type());
 		}
-		scan_function.function_info =
-		    make_shared_ptr<HMSScanFunctionInfo>(partition_plan, std::move(column_names), std::move(column_types));
+		// Parquet and Avro files name their columns, so the scan produces the table's columns and matches each file to
+		// them by name. CSV files do not: the CSV scan takes its columns from the columns parameter set below, which is
+		// built from the same list as the table's, and gets the partition columns appended.
+		auto bind_to_table_columns = !format_result.IsCSV();
+		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(
+		    partition_plan, std::move(column_names), std::move(column_types), bind_to_table_columns);
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 	}
 

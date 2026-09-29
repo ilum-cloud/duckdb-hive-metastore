@@ -161,7 +161,7 @@ ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore);
 
 ### Partitioned tables
 
-A partitioned table is read through the partitions registered in the metastore:
+A partitioned Parquet, CSV (text) or Avro table is read through the partitions registered in the metastore:
 
 - **Each partition is read at the location the metastore records for it**, which may be anywhere, including outside
   the table location. Directories do not have to be named `key=value`: layouts like `production/2024/` work, and so do
@@ -191,14 +191,17 @@ A partitioned table is read through the partitions registered in the metastore:
 |---|---|
 | `auto` (default) | Use the registered partitions; when a table has none, glob the table location, take partition values from `key=value` directory names, else from the columns of that name in the files, and log a warning |
 | `hms` | Always use the registered partitions; fail if a partitioned table has none |
-| `path` | Never read the partition list: glob the table location and take partition values from `key=value` directory names |
+| `path` | Never read the partition list: glob the table location and take partition values from `key=value` directory names, else from the columns of that name in the files |
+
+Without registered partitions (`path`, or `auto` falling back), a filter on a partition column still skips the files
+whose `key=value` directories rule them out, before they are opened.
 
 ```sql
 ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore, PARTITION_MODE 'hms');
 ```
 
-Partitioned CSV and Avro tables are not covered yet: their partition columns are not filled in (they were not before
-this either), so only the columns stored in the files are returned.
+CSV files do not name their columns, so a CSV table reads them by position, as Hive does; Parquet and Avro files are
+matched to the table's columns by name.
 
 ### Metadata caching
 
@@ -377,7 +380,7 @@ Error handling:
 ### Important Notes
 
 - **Format Extensions:** The HMS extension delegates data reading to DuckDB's format scanners. Install required extensions (`delta`, `iceberg`, etc.) before querying those table types.
-- **Partitioning:** Partitioned Parquet tables are read through the partitions registered in the metastore, at the locations it records, with the partition values it holds. See [Partitioned tables](#partitioned-tables).
+- **Partitioning:** Partitioned Parquet, CSV and Avro tables are read through the partitions registered in the metastore, at the locations it records, with the partition values it holds. See [Partitioned tables](#partitioned-tables).
 - **Spark Compatibility:** Tables created by Spark (including complex types like structs, arrays, maps) are fully supported through Spark schema metadata parsing.
 
 ## Building
