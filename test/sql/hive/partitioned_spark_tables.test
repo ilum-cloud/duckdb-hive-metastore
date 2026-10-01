@@ -1,0 +1,69 @@
+# name: test/sql/hive/partitioned_spark_tables.test
+# description: Partitioned CSV and text tables written by Spark read the same as Spark reads them, and a Spark CSV table is found at the location in its serde path
+# group: [hive]
+
+# The tables come from the Spark seed (test/seed_hive_data_spark.py, step 14). Each partitioned one holds 4 rows in the
+# partitions eu, us and apac, apac stored outside the table location.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# Spark's own CSV format: the schema in the table properties lists the partition column, the files do not hold it
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_spark_csv_parts') ORDER BY cid;
+----
+id	INTEGER
+name	VARCHAR
+region	VARCHAR
+
+query ITT
+SELECT id, name, region FROM hms.sample_db.duck_fixture_spark_csv_parts ORDER BY id;
+----
+1	alice	eu
+2	bob	eu
+3	carol	us
+4	dave	apac
+
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_spark_csv_parts WHERE region = 'apac';
+----
+4	dave
+
+# A Hive text table written by Spark, with Hive's default \001 delimiter
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_spark_text_parts') ORDER BY cid;
+----
+id	INTEGER
+name	VARCHAR
+region	VARCHAR
+
+query ITT
+SELECT id, name, region FROM hms.sample_db.duck_fixture_spark_text_parts ORDER BY id;
+----
+1	alice	eu
+2	bob	eu
+3	carol	us
+4	dave	apac
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_spark_text_parts WHERE region IN ('eu', 'us');
+----
+3
+
+# Spark keeps the location of its CSV tables in the serde's path parameter, the table location being a placeholder
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_spark_csv_external ORDER BY id;
+----
+1	alice
+2	bob

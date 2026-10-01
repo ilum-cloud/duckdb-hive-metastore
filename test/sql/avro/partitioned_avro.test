@@ -56,3 +56,18 @@ query IT
 SELECT id, name FROM hms.sample_db.duck_fixture_avro_parts WHERE region = 'us';
 ----
 2	b
+
+# Spark's own Avro format, from the Spark seed (test/seed_hive_data_spark.py, step 14): 4 rows in the partitions eu, us
+# and apac, apac stored outside the table location
+query ITT
+SELECT id, name, region FROM hms.sample_db.duck_fixture_spark_avro_parts ORDER BY id;
+----
+1	alice	eu
+2	bob	eu
+3	carol	us
+4	dave	apac
+
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_spark_avro_parts WHERE region = 'apac';
+----
+4	dave
