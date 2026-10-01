@@ -98,12 +98,18 @@ NormalizedPathResult PathUtils::NormalizeScanPath(const string &storage_path, co
 	NormalizedPathResult result;
 	string scan_path = storage_path;
 
-	// Strip __PLACEHOLDER__ if present (for any table type, not just Delta)
-	// This handles Spark's placeholder suffix that appears in some table paths
+	// A table Spark cannot store the Hive way (CSV, JSON, Delta, ...) gets a placeholder under the warehouse as its
+	// location, and the real one in the serde's path parameter. Take that; without it, strip the placeholder suffix,
+	// which gives the real location of a table Spark manages itself.
 	if (StringUtil::Contains(scan_path, path::PLACEHOLDER)) {
-		auto placeholder_pos = scan_path.find(path::PLACEHOLDER_SUFFIX);
-		if (placeholder_pos != string::npos) {
-			scan_path = scan_path.substr(0, placeholder_pos);
+		auto serde_path = table_data.serde_parameters.find("path");
+		if (serde_path != table_data.serde_parameters.end() && !serde_path->second.empty()) {
+			scan_path = serde_path->second;
+		} else {
+			auto placeholder_pos = scan_path.find(path::PLACEHOLDER_SUFFIX);
+			if (placeholder_pos != string::npos) {
+				scan_path = scan_path.substr(0, placeholder_pos);
+			}
 		}
 	}
 

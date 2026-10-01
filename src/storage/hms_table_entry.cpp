@@ -511,15 +511,29 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		vector<HMSAPIColumnDefinition> columns;
 		bool has_spark_schema = HMSUtils::ParseSparkSchema(table_data->parameters, columns);
 
+		// The partition columns are not in the files of a partitioned table: the partition reader appends them. Spark's
+		// schema lists them, last, so leave them out of what the files are parsed as.
+		case_insensitive_set_t partition_columns;
+		if (InjectsPartitionColumns(*table_data, format_result)) {
+			for (const auto &partition_key : table_data->partition_keys) {
+				partition_columns.insert(partition_key.name);
+			}
+		}
 		if (has_spark_schema) {
 			// Successfully parsed Spark schema, use it.
 			// The types in 'columns' are already DuckDB LogicalType strings from ParseSparkSchema
 			for (const auto &col : columns) {
+				if (partition_columns.count(col.name)) {
+					continue;
+				}
 				struct_children.push_back(make_pair(col.name, Value(col.type)));
 			}
 		} else {
 			// Fallback to standard HMS columns
 			for (const auto &col : table_data->columns) {
+				if (partition_columns.count(col.name)) {
+					continue;
+				}
 				// Convert HMS type to DuckDB LogicalType string
 				auto duckdb_type = HMSUtils::TypeToLogicalType(context, col.type);
 				struct_children.push_back(make_pair(col.name, Value(duckdb_type.ToString())));
