@@ -159,7 +159,8 @@ vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index) 
 	auto &fs = FileSystem::GetFileSystem(context);
 	// One listing of everything under the location; the format's pattern picks the data files from it, else Hive's
 	// pattern for the files it writes without an extension (`000000_0`). Globbing each pattern would list twice.
-	auto pattern = partition.fallback_scan_location.empty() ? partition.scan_location : partition.location + "/**";
+	// `/**/*` rather than `/**`: on a local file system a trailing `**` skips symlinked files.
+	auto pattern = partition.fallback_scan_location.empty() ? partition.scan_location : partition.location + "/**/*";
 	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
 	// A partition nested inside this one's location keeps its own files
 	files.erase(std::remove_if(files.begin(), files.end(),
@@ -281,7 +282,7 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 		is_listed_together[position] = true;
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	for (auto &file : fs.GlobFiles(plan->table_location + "/**", FileGlobOptions::ALLOW_EMPTY)) {
+	for (auto &file : fs.GlobFiles(plan->table_location + "/**/*", FileGlobOptions::ALLOW_EMPTY)) {
 		// Files of partitions not being read, and of directories no partition points at, are left out
 		auto owners = PartitionsOwning(*plan, file.path);
 		if (!owners) {

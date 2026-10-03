@@ -237,8 +237,8 @@ collation: on a Postgres metastore with an `en_US` collation, `'a' < 'B'`, so `s
 
 When nothing can be sent, or the metastore refuses the filter, the partition names are listed, the filter is evaluated
 on the values they hold, and only the matching partitions are fetched. On a Postgres database Hive 3.1 refuses every
-filter on a `date` key (it binds the date as text), and a filter on an integral key whenever another table holds text
-at the same key position (Postgres casts those values too). A refused key is left out of the filters for
+filter on a `date` key (it binds the date as text), and can refuse one on an integral key when another table holds
+text at the same key position (depending on its plan, Postgres casts those values too). A refused key is left out of the filters for
 `METADATA_CACHE_TTL` seconds and the rest of the filter is sent again at once.
 
 `EXPLAIN` shows how the partitions were selected:
