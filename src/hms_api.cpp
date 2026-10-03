@@ -164,6 +164,22 @@ bool HMSAPI::TryGetPartitionsByFilter(ClientContext &ctx, const string &schema, 
 	return true;
 }
 
+idx_t HMSAPI::CountPartitions(ClientContext &ctx, const string &schema, const string &table, const string &endpoint) {
+	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_num_partitions_by_filter db=%s table=%s", schema, table);
+	auto count = GetClient(endpoint)->CountPartitions(schema, table);
+	return count < 0 ? 0 : static_cast<idx_t>(count);
+}
+
+vector<HMSAPIPartition> HMSAPI::GetFirstPartitions(ClientContext &ctx, const string &schema, const string &table,
+                                                   const string &endpoint, int16_t max_parts) {
+	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partitions db=%s table=%s max_parts=%d", schema, table, max_parts);
+	vector<HMSAPIPartition> result;
+	for (const auto &partition : GetClient(endpoint)->GetPartitions(schema, table, max_parts)) {
+		result.push_back(PartitionFromThrift(partition));
+	}
+	return result;
+}
+
 vector<HMSAPIPartition> HMSAPI::GetPartitions(ClientContext &ctx, const string &schema, const string &table,
                                               const vector<string> &partition_names, const string &endpoint) {
 	vector<HMSAPIPartition> result;

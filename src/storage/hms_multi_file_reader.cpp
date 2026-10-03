@@ -25,6 +25,9 @@ static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
 static constexpr idx_t KEYS_PER_LISTING_REQUEST = 1000;
 //! How many partitions are listed at once when a filter selected the partitions
 static constexpr idx_t PREFETCH_PARTITIONS = 16;
+//! A filter's selection is listed together with one listing of the table location only from this many partitions on:
+//! fewer cost a few rounds of parallel listings at most
+static constexpr idx_t MIN_PARTITIONS_LISTED_TOGETHER = 256;
 
 void HMSScanDiagnostics::Record(const HMSPartitionSelection &selection, idx_t selected_p) {
 	lock_guard<mutex> guard(lock);
@@ -81,10 +84,10 @@ HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HM
 HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
                                            shared_ptr<HMSScanDiagnostics> diagnostics_p, FileGlobInput glob_input_p,
                                            shared_ptr<const HMSPartitionPlan> plan_p, vector<idx_t> partition_indexes_p,
-                                           ListingMode mode)
+                                           ListingMode mode, optional_idx table_partitions_p)
     : LazyMultiFileList(&context), context(context), cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)),
       glob_input(std::move(glob_input_p)), state(State::PARTITIONS), binding(false), plan(std::move(plan_p)),
-      partition_indexes(std::move(partition_indexes_p)), listing_mode(mode) {
+      partition_indexes(std::move(partition_indexes_p)), listing_mode(mode), table_partitions(table_partitions_p) {
 }
 
 void HMSPartitionFileList::FinishBinding() const {
@@ -256,11 +259,14 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 		return;
 	}
 	bool cheaper;
-	if (plan->files_under_table_location.IsValid()) {
+	if (plan->complete && plan->files_under_table_location.IsValid()) {
 		auto files = plan->files_under_table_location.GetIndex();
 		cheaper = (files + KEYS_PER_LISTING_REQUEST - 1) / KEYS_PER_LISTING_REQUEST < positions.size();
-	} else {
+	} else if (plan->complete) {
 		cheaper = positions.size() * 2 > plan->partitions_under_table_location;
+	} else {
+		// A filter's selection knows only its own partitions: compare with every partition the table has
+		cheaper = table_partitions.IsValid() && positions.size() * 2 >= table_partitions.GetIndex();
 	}
 	if (!cheaper) {
 		return;
@@ -291,9 +297,9 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 }
 
 void HMSPartitionFileList::PrefetchFrom(idx_t position) const {
-	// A filter selected the partitions: list them, never the table location, several at once so a wide selection
-	// does not pay one request after another. The scan's other threads wait on the list lock meanwhile, so the work
-	// cannot go to the task scheduler; plain threads do it.
+	// List the partitions not listed together with the table location several at once, so a wide selection does not
+	// pay one request after another. The scan's other threads wait on the list lock meanwhile, so the work cannot go
+	// to the task scheduler; plain threads do it.
 	if (context.interrupted) {
 		throw InterruptException();
 	}
@@ -302,6 +308,9 @@ void HMSPartitionFileList::PrefetchFrom(idx_t position) const {
 	vector<vector<OpenFileInfo>> results(count);
 	vector<ErrorData> errors(count);
 	auto list = [&](idx_t i) {
+		if (!is_listed_together.empty() && is_listed_together[position + i]) {
+			return;
+		}
 		try {
 			results[i] = ListPartition(partition_indexes[position + i]);
 		} catch (std::exception &ex) {
@@ -380,15 +389,14 @@ bool HMSPartitionFileList::ExpandNextPath() const {
 	auto partition_index = partition_indexes[position];
 
 	vector<OpenFileInfo> files;
-	if (listing_mode == ListingMode::TOGETHER_IF_CHEAPER) {
-		if (!listing_decided) {
-			listing_decided = true;
-			ListTogetherIfCheaper();
-		}
-		if (!is_listed_together.empty() && is_listed_together[position]) {
-			files = SelectDataFiles(plan->partitions[partition_index], std::move(listed_together[position]));
-		} else {
-			files = ListPartition(partition_index);
+	if (listing_mode == ListingMode::TOGETHER_IF_CHEAPER && !listing_decided) {
+		listing_decided = true;
+		ListTogetherIfCheaper();
+	}
+	if (!is_listed_together.empty() && is_listed_together[position]) {
+		files = SelectDataFiles(plan->partitions[partition_index], std::move(listed_together[position]));
+		if (!plan->complete) {
+			DropNestedPartitionFiles(partition_index, files);
 		}
 	} else {
 		if (position < prefetched_from || position >= prefetched_from + prefetched.size()) {
@@ -612,12 +620,33 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 		filters = std::move(preserved_filters);
 	}
 	// Every partition of the table is read: one listing of the table location may be cheapest. A filter selected the
-	// partitions: list each of them, never the table location.
-	auto mode = current_plan->complete && kept.size() == current_plan->partitions.size()
-	                ? ListingMode::TOGETHER_IF_CHEAPER
-	                : ListingMode::PER_PARTITION;
+	// partitions: list each of them, unless they are most of the table's partitions (a weak filter), where one listing
+	// of the table location takes far fewer requests.
+	auto mode = ListingMode::PER_PARTITION;
+	optional_idx table_partitions;
+	if (current_plan->complete && kept.size() == current_plan->partitions.size()) {
+		mode = ListingMode::TOGETHER_IF_CHEAPER;
+	} else {
+		idx_t under_table_location = 0;
+		for (auto partition_index : kept) {
+			if (current_plan->IsUnderTableLocation(current_plan->partitions[partition_index])) {
+				under_table_location++;
+			}
+		}
+		if (under_table_location >= MIN_PARTITIONS_LISTED_TOGETHER) {
+			table_partitions = current_plan->complete ? optional_idx(current_plan->partitions_under_table_location)
+			                                          : cache->PartitionCount(context_p);
+			if (table_partitions.IsValid() && under_table_location * 2 >= table_partitions.GetIndex()) {
+				mode = ListingMode::TOGETHER_IF_CHEAPER;
+				DUCKDB_LOG_DEBUG(context_p,
+				                 "hive_metastore listing db=%s table=%s the table location, once: %d of its %d "
+				                 "partitions are selected",
+				                 schema.database, schema.table, under_table_location, table_partitions.GetIndex());
+			}
+		}
+	}
 	return make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input, current_plan, std::move(kept),
-	                                       mode);
+	                                       mode, table_partitions);
 }
 
 HMSMultiFileReader::HMSMultiFileReader(shared_ptr<HMSPartitionCache> cache_p,

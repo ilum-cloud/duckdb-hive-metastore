@@ -144,6 +144,32 @@ vector<string> HMSClient::GetPartitionNames(const string &db_name, const string 
 	return partition_names;
 }
 
+int32_t HMSClient::CountPartitions(const string &db_name, const string &table_name) {
+	if (!connected)
+		Open();
+	try {
+		// An empty filter counts every partition, with one COUNT in the metastore's database
+		return client->get_num_partitions_by_filter(db_name, table_name, "");
+	} catch (apache::thrift::TException &tx) {
+		throw IOException("Failed to count the partitions of '%s.%s': %s", db_name, table_name, tx.what());
+	}
+}
+
+vector<Apache::Hadoop::Hive::Partition> HMSClient::GetPartitions(const string &db_name, const string &table_name,
+                                                                 int16_t max_parts) {
+	if (!connected)
+		Open();
+	vector<Apache::Hadoop::Hive::Partition> partitions;
+	try {
+		client->get_partitions(partitions, db_name, table_name, max_parts);
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		return partitions;
+	} catch (apache::thrift::TException &tx) {
+		throw IOException("Failed to get the partitions of '%s.%s': %s", db_name, table_name, tx.what());
+	}
+	return partitions;
+}
+
 vector<Apache::Hadoop::Hive::Partition> HMSClient::GetPartitionsByNames(const string &db_name, const string &table_name,
                                                                         const vector<string> &partition_names) {
 	if (!connected)

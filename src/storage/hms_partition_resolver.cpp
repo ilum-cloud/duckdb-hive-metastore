@@ -572,6 +572,36 @@ HMSPartitionSelection HMSPartitionCache::ResolveForFilters(ClientContext &contex
 	}
 }
 
+optional_idx HMSPartitionCache::PartitionCount(ClientContext &context) {
+	auto generation = catalog.GetCacheGeneration();
+	{
+		lock_guard<mutex> guard(lock);
+		if (complete_plan && IsFresh(complete_plan_loaded_at, complete_plan_generation, generation)) {
+			return complete_plan->partitions.size();
+		}
+		if (names && IsFresh(names_loaded_at, names_generation, generation)) {
+			return names->size();
+		}
+		if (partition_count.IsValid() && IsFresh(partition_count_loaded_at, partition_count_generation, generation)) {
+			return partition_count;
+		}
+	}
+	idx_t count;
+	try {
+		count = HMSAPI::CountPartitions(context, schema.database, schema.table, catalog.endpoint);
+	} catch (std::exception &ex) {
+		if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		return optional_idx();
+	}
+	lock_guard<mutex> guard(lock);
+	partition_count = count;
+	partition_count_loaded_at = std::chrono::steady_clock::now();
+	partition_count_generation = generation;
+	return count;
+}
+
 shared_ptr<const HMSPartitionPlan> HMSPartitionCache::CompletePlan(ClientContext &context) {
 	auto generation = catalog.GetCacheGeneration();
 	{

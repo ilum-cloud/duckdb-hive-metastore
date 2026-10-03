@@ -61,19 +61,21 @@ struct HMSScanFunctionInfo : public TableFunctionInfo {
 class HMSPartitionFileList : public LazyMultiFileList {
 public:
 	enum class ListingMode : uint8_t {
-		//! One listing of the table location when that takes fewer requests (every partition is read)
+		//! One listing of the table location when that takes fewer requests (every partition, or most, is read)
 		TOGETHER_IF_CHEAPER,
-		//! Each partition on its own, several at once (a filter selected the partitions)
+		//! Each partition on its own, several at once (a filter selected a few of the partitions)
 		PER_PARTITION
 	};
 
 	//! Not resolved yet
 	HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache,
 	                     shared_ptr<HMSScanDiagnostics> diagnostics, FileGlobInput glob_input);
-	//! Resolved to the given partitions of `plan`
+	//! Resolved to the given partitions of `plan`. `table_partitions`: how many partitions the table has, which tells
+	//! whether a filter's selection holds most of them
 	HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache,
 	                     shared_ptr<HMSScanDiagnostics> diagnostics, FileGlobInput glob_input,
-	                     shared_ptr<const HMSPartitionPlan> plan, vector<idx_t> partition_indexes, ListingMode mode);
+	                     shared_ptr<const HMSPartitionPlan> plan, vector<idx_t> partition_indexes, ListingMode mode,
+	                     optional_idx table_partitions = optional_idx());
 
 	//! Selects the partitions (if not done yet) and drops those whose values cannot satisfy the filters, before their
 	//! locations are listed
@@ -131,6 +133,7 @@ private:
 	//! The partitions still to scan, as indexes into plan->partitions
 	mutable vector<idx_t> partition_indexes;
 	mutable ListingMode listing_mode = ListingMode::TOGETHER_IF_CHEAPER;
+	mutable optional_idx table_partitions;
 	mutable idx_t next_partition = 0;
 	mutable bool listing_decided = false;
 	//! When the partitions under the table location were listed together: the files of each, by position in

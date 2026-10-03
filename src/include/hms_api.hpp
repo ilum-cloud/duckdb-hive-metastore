@@ -72,6 +72,11 @@ public:
 	static bool TryGetPartitionsByFilter(ClientContext &ctx, const string &schema, const string &table,
 	                                     const string &filter, const string &endpoint, vector<HMSAPIPartition> &result,
 	                                     string &rejection);
+	//! How many partitions a table has, counted by the metastore
+	static idx_t CountPartitions(ClientContext &ctx, const string &schema, const string &table, const string &endpoint);
+	//! The first partitions of a table, at most `max_parts`, with their locations
+	static vector<HMSAPIPartition> GetFirstPartitions(ClientContext &ctx, const string &schema, const string &table,
+	                                                  const string &endpoint, int16_t max_parts);
 	//! The named partitions, with the location each one is stored at
 	static vector<HMSAPIPartition> GetPartitions(ClientContext &ctx, const string &schema, const string &table,
 	                                             const vector<string> &partition_names, const string &endpoint);

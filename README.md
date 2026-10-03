@@ -170,7 +170,8 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
 - **The partition column values come from the metastore**, not from the directory names, so they are correct
   regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
 - **A filter on partition columns selects the partitions.** The metastore returns only the partitions that can
-  match, and only their locations are listed, never the table location. See
+  match, and only their locations are listed, 16 at a time. A weak filter that keeps at least half of the table's
+  partitions (and 256 or more) lists the table location once instead, which takes far fewer requests. See
   [Filters the metastore evaluates](#filters-the-metastore-evaluates).
 - **Only registered partitions are read.** Directories under the table location that no partition points at are
   skipped, and a file belongs to the partition at the deepest location containing it, so a partition nested inside
@@ -235,9 +236,10 @@ collation: on a Postgres metastore with an `en_US` collation, `'a' < 'B'`, so `s
 `off` never sends a filter.
 
 When nothing can be sent, or the metastore refuses the filter, the partition names are listed, the filter is evaluated
-on the values they hold, and only the matching partitions are fetched. Hive 3.1 refuses every filter on a `date` key
-when its database is Postgres (it binds the date as text), and can refuse one on an integral key there too. A refused
-key is left out of the filters for `METADATA_CACHE_TTL` seconds and the rest of the filter is sent again at once.
+on the values they hold, and only the matching partitions are fetched. On a Postgres database Hive 3.1 refuses every
+filter on a `date` key (it binds the date as text), and a filter on an integral key whenever another table holds text
+at the same key position (Postgres casts those values too). A refused key is left out of the filters for
+`METADATA_CACHE_TTL` seconds and the rest of the filter is sent again at once.
 
 `EXPLAIN` shows how the partitions were selected:
 

@@ -43,6 +43,11 @@ public:
 	// evaluate it, or the table is gone), with its reason in `rejection`; throws IOException if it cannot be reached.
 	bool TryGetPartitionsByFilter(const string &db_name, const string &table_name, const string &filter,
 	                              vector<Apache::Hadoop::Hive::Partition> &result, string &rejection);
+	// How many partitions a table has
+	int32_t CountPartitions(const string &db_name, const string &table_name);
+	// The first partitions of a table, at most `max_parts`, each with its storage descriptor
+	vector<Apache::Hadoop::Hive::Partition> GetPartitions(const string &db_name, const string &table_name,
+	                                                      int16_t max_parts);
 	// The named partitions, each with its own storage descriptor (and therefore its own location)
 	vector<Apache::Hadoop::Hive::Partition> GetPartitionsByNames(const string &db_name, const string &table_name,
 	                                                             const vector<string> &partition_names);

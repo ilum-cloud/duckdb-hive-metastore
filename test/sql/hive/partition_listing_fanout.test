@@ -72,6 +72,56 @@ FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2
 ----
 4	0
 
+# A filter selecting most of a table's partitions (duck_fixture_many_parts has 300, n = 1 to 300): one listing of the
+# table location takes fewer requests than one per partition. How many partitions the table has comes from the
+# partition names when they were listed (on Postgres the metastore refuses this filter on an int key at position 0,
+# when other tables hold text there), else the metastore counts them.
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_fixture_many_parts/p1/data.parquet';
+
+statement ok
+COPY (SELECT 100 AS id) TO 's3://test-bucket/duck_fixture_many_parts/p100/data.parquet';
+
+statement ok
+COPY (SELECT 250 AS id) TO 's3://test-bucket/duck_fixture_many_parts/p250/data.parquet';
+
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_many_parts;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM hms.sample_db.duck_fixture_many_parts WHERE n >= 2;
+----
+[100, 250]
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore listing % the table location, once: 299 of its 300 partitions are selected';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+1
+
+# Fewer than 256 partitions are listed one by one, even when they are most of the table's
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM hms.sample_db.duck_fixture_many_parts WHERE n >= 100;
+----
+[100, 250]
+
+query II
+SELECT count(*) FILTER (WHERE regexp_matches(url_decode(request.url), 'prefix=duck_fixture_many_parts/p[0-9]+/')),
+       count(*) FILTER (WHERE NOT regexp_matches(url_decode(request.url), 'prefix=duck_fixture_many_parts/p[0-9]+/'))
+FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+201	0
+
 # Without a filter every partition is read, and one listing of the table location is cheaper
 statement ok
 CALL truncate_duckdb_logs();

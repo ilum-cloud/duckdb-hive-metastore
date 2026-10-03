@@ -92,6 +92,9 @@ public:
 	                                        const unordered_map<column_t, idx_t> &partition_columns);
 	//! Every partition, to decide which partition a file belongs to. Throws when the metastore cannot be reached.
 	shared_ptr<const HMSPartitionPlan> CompletePlan(ClientContext &context);
+	//! How many partitions the table has: from what is cached, else counted by the metastore. Invalid when the
+	//! metastore cannot tell.
+	optional_idx PartitionCount(ClientContext &context);
 
 	//! Builds a plan from partitions the metastore returned: locations normalized, values cast, sorted by name
 	shared_ptr<const HMSPartitionPlan> BuildPlan(ClientContext &context, vector<HMSAPIPartition> partitions,
@@ -141,6 +144,10 @@ private:
 	shared_ptr<const vector<string>> names;
 	time_point names_loaded_at;
 	idx_t names_generation = 0;
+	//! How many partitions the metastore counted
+	optional_idx partition_count;
+	time_point partition_count_loaded_at;
+	idx_t partition_count_generation = 0;
 	//! -1 unknown, else whether the table has a partition registered
 	int8_t has_partitions = -1;
 	time_point has_partitions_loaded_at;

@@ -28,6 +28,8 @@ set -euo pipefail
 #                            metastore filter tests.
 #   * duck_fixture_awkward_keys - a key named `date` (a keyword of the metastore's filter grammar) and a
 #                            varchar(10) key (a type the metastore does not filter on).
+#   * duck_fixture_many_parts - 300 partitions (n = 1 to 300), enough for a filter selecting most of
+#                            them to list the table location once.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -36,6 +38,24 @@ set -euo pipefail
 # `make test-env-start`. The Hive CLI needs writable scratch directories inside the container.
 
 cd "$(dirname "$0")/../.."
+
+# duck_fixture_pushdown's NULL partitions are renamed once registered (see the update below), so adding them again
+# would register the originals a second time: add its partitions only while it has none.
+pushdown_partitions=$(docker compose exec -T hive-metastore-postgresql psql -U hive -d metastore -At -c "
+SELECT count(*) FROM \"PARTITIONS\" p JOIN \"TBLS\" t ON t.\"TBL_ID\" = p.\"TBL_ID\"
+ WHERE t.\"TBL_NAME\" = 'duck_fixture_pushdown'")
+add_pushdown_partitions=""
+if [ "$pushdown_partitions" = "0" ]; then
+  add_pushdown_partitions="
+ALTER TABLE sample_db.duck_fixture_pushdown ADD IF NOT EXISTS
+  PARTITION (s='a', n=1, d='2024-01-01')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p1'
+  PARTITION (s='B', n=2, d='2024-01-02')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p2'
+  PARTITION (s='b', n=3, d='2024-01-03')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p3'
+  PARTITION (s='nulls', n=4, d='2024-01-04') LOCATION 's3a://test-bucket/duck_fixture_pushdown/p4'
+  PARTITION (s='c', n=5, d='2024-01-05')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p5'
+  PARTITION (s='d', n=6, d='2024-01-06')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p6'
+  PARTITION (s='x/y', n=7, d='2024-01-07')   LOCATION 's3a://test-bucket/duck_fixture_pushdown/p7';"
+fi
 
 docker compose exec -T hive-metastore hive \
   --hiveconf hive.exec.scratchdir=/tmp/hive_fixture_scratch \
@@ -117,15 +137,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_pushdown (id INT)
   PARTITIONED BY (s STRING, n INT, d DATE)
   STORED AS PARQUET
   LOCATION 's3a://test-bucket/duck_fixture_pushdown';
-
-ALTER TABLE sample_db.duck_fixture_pushdown ADD IF NOT EXISTS
-  PARTITION (s='a', n=1, d='2024-01-01')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p1'
-  PARTITION (s='B', n=2, d='2024-01-02')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p2'
-  PARTITION (s='b', n=3, d='2024-01-03')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p3'
-  PARTITION (s='nulls', n=4, d='2024-01-04') LOCATION 's3a://test-bucket/duck_fixture_pushdown/p4'
-  PARTITION (s='c', n=5, d='2024-01-05')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p5'
-  PARTITION (s='d', n=6, d='2024-01-06')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p6'
-  PARTITION (s='x/y', n=7, d='2024-01-07')   LOCATION 's3a://test-bucket/duck_fixture_pushdown/p7';
+$add_pushdown_partitions
 
 CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_awkward_keys (id INT)
   PARTITIONED BY (\`date\` STRING, v VARCHAR(10))
@@ -135,6 +147,14 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_awkward_keys (id INT)
 ALTER TABLE sample_db.duck_fixture_awkward_keys ADD IF NOT EXISTS
   PARTITION (\`date\`='x', v='1') LOCATION 's3a://test-bucket/duck_fixture_awkward_keys/k1'
   PARTITION (\`date\`='y', v='2') LOCATION 's3a://test-bucket/duck_fixture_awkward_keys/k2';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_many_parts (id INT)
+  PARTITIONED BY (n INT)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_many_parts';
+
+ALTER TABLE sample_db.duck_fixture_many_parts ADD IF NOT EXISTS
+$(for n in $(seq 1 300); do echo "  PARTITION (n=$n) LOCATION 's3a://test-bucket/duck_fixture_many_parts/p$n'"; done);
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it
