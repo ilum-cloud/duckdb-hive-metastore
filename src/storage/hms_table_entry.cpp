@@ -1,4 +1,5 @@
 #include "storage/hms_catalog.hpp"
+#include "storage/hms_csv_options.hpp"
 #include "storage/hms_multi_file_reader.hpp"
 #include "storage/hms_partition_resolver.hpp"
 #include "storage/hms_schema_entry.hpp"
@@ -396,57 +397,7 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 			param_map["hive_partitioning"] = Value::BOOLEAN(false);
 		}
 
-		// Handle delimiter and other CSV options
-		// Default Hive delimiter is \001 (Ctrl-A)
-		string delim = string(1, hms::constants::DEFAULT_HIVE_DELIMITER);
-		auto it = table_data->serde_parameters.find(hms::serde_param::FIELD_DELIM);
-		if (it != table_data->serde_parameters.end()) {
-			delim = it->second;
-		}
-
-		bool is_default_hive_delim = (delim == string(1, hms::constants::DEFAULT_HIVE_DELIMITER));
-
-		bool is_spark_csv = false;
-		auto csv_provider_it = table_data->parameters.find(hms::spark_param::PROVIDER);
-		if (csv_provider_it != table_data->parameters.end() &&
-		    StringUtil::CIEquals(csv_provider_it->second, hms::format::CSV)) {
-			is_spark_csv = true;
-		}
-
-		// Logic to determine CSV parsing mode:
-		// 1. If it's a Spark CSV table (provider=csv), we enable auto_detect.
-		//    If the delimiter is default (\x01), we ignore it to let the sniffer find the real one (likely comma).
-		// 2. If it has a Spark schema AND a non-default delimiter (e.g. comma), it's likely a compatible CSV table.
-		//    We enable auto_detect.
-		// 3. Otherwise (Standard Hive table, usually LazySimpleSerDe), we disable auto_detect and enforce strict
-		// parsing.
-
-		if (is_spark_csv || (has_spark_schema && !is_default_hive_delim)) {
-			// Spark CSV or compatible (e.g. comma separated)
-			// Enable auto_detect to allow sniffing of quotes, headers, etc.
-			param_map["auto_detect"] = Value::BOOLEAN(true);
-
-			if (it != table_data->serde_parameters.end()) {
-				// Set sep if explicitly defined, UNLESS it's the default hive delimiter for a Spark CSV
-				// (because Spark CSVs often leave SerDe delim as default \x01 while actual file is comma)
-				if (!is_spark_csv || !is_default_hive_delim) {
-					param_map["sep"] = Value(delim);
-				}
-			}
-		} else {
-			// Strict Hive behavior (LazySimpleSerDe) or Default Hive
-			param_map["header"] = Value::BOOLEAN(false); // Hive tables usually have no header
-			param_map["sep"] = Value(delim);
-			param_map["quote"] = Value("");  // Disable quoting
-			param_map["escape"] = Value(""); // Disable escaping
-
-			// Explicitly disable auto detection for strict Hive tables
-			param_map["auto_detect"] = Value::BOOLEAN(false);
-		}
-
-		// If strict mode is failing, we might want to relax it, but for now let's try with correct delimiters
-		param_map["null_padding"] = Value::BOOLEAN(true);  // Hive treats missing columns as null
-		param_map["ignore_errors"] = Value::BOOLEAN(true); // Best effort
+		AddCSVReadOptions(context, *table_data, has_spark_schema, !partition_columns.empty(), param_map);
 	}
 
 	vector<LogicalType> return_types;

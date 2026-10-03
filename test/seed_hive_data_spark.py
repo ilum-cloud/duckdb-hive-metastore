@@ -690,6 +690,27 @@ def main():
         spark.sql(f"INSERT INTO sample_db.{name} PARTITION (region='apac') VALUES (4, 'dave')")
         print(f"✓ Created '{name}' (4 rows in 3 partitions, 'apac' outside the table location)")
 
+    # A partitioned Spark CSV table written with options: a header line, ';' between fields, NA for NULL and dates as
+    # dd/MM/yyyy. Values holding the separator, quotes, a backslash and the empty string show the files are read in
+    # that dialect.
+    options_csv = "s3a://test-bucket/duck_fixture_spark_csv_opts"
+    spark.sql("DROP TABLE IF EXISTS sample_db.duck_fixture_spark_csv_opts")
+    clear_path(options_csv)
+    spark.sql(
+        "CREATE TABLE sample_db.duck_fixture_spark_csv_opts (id INT, name STRING, note STRING, day DATE, region STRING) "
+        "USING csv OPTIONS (header 'true', sep ';', nullValue 'NA', dateFormat 'dd/MM/yyyy') "
+        f"PARTITIONED BY (region) LOCATION '{options_csv}'"
+    )
+    spark.sql(
+        "INSERT INTO sample_db.duck_fixture_spark_csv_opts PARTITION (region='eu') VALUES "
+        "(1, 'alice', 'a;b', DATE '2024-01-01'), (2, 'bob', NULL, NULL), (3, '', 'say \"hi\"', DATE '2024-01-03')"
+    )
+    spark.sql(
+        "INSERT INTO sample_db.duck_fixture_spark_csv_opts PARTITION (region='us') VALUES "
+        "(4, 'NA?', 'c:\\\\dir', DATE '2024-01-04')"
+    )
+    print("✓ Created 'duck_fixture_spark_csv_opts' (4 rows in 2 partitions, Spark CSV table with options)")
+
     external_csv = "s3a://test-bucket/duck_fixture_spark_csv_external"
     spark.sql("DROP TABLE IF EXISTS sample_db.duck_fixture_spark_csv_external")
     clear_path(external_csv)
