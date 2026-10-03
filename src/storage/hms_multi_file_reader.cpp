@@ -354,8 +354,10 @@ void HMSPartitionFileList::DecideAdaptiveListing(idx_t position) const {
 	if (!partitions_under_location.IsValid()) {
 		return;
 	}
-	auto keys = static_cast<double>(listed_keys) * static_cast<double>(partitions_under_location.GetIndex()) /
-	            static_cast<double>(listed_partitions);
+	// A partition directory usually has a key of its own as well (the marker s3a and others create for it), which a
+	// listing of the table location returns but a partition's glob does not
+	auto keys = static_cast<double>(listed_keys + listed_partitions) *
+	            static_cast<double>(partitions_under_location.GetIndex()) / static_cast<double>(listed_partitions);
 	auto pages = MaxValue<idx_t>(1, static_cast<idx_t>(std::ceil(keys / KEYS_PER_LISTING_REQUEST)));
 	if (pages * LISTING_PAGE_ROUNDS >= rounds) {
 		return;
