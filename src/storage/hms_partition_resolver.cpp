@@ -16,6 +16,8 @@
 
 namespace duckdb {
 
+//! How many partitions a row estimate made before the partitions are selected looks at
+static constexpr idx_t ESTIMATE_SAMPLE = 32;
 //! How many filters the metastore's answers are kept for, per table, and how many partitions they may hold together
 static constexpr idx_t FILTER_RESULTS_CACHED = 32;
 static constexpr idx_t FILTER_RESULT_PARTITIONS_CACHED = 100000;
@@ -610,6 +612,64 @@ optional_idx HMSPartitionCache::PartitionCount(ClientContext &context) {
 	partition_count_loaded_at = std::chrono::steady_clock::now();
 	partition_count_generation = generation;
 	return count;
+}
+
+HMSPartitionSample HMSPartitionCache::SampleForEstimate(ClientContext &context) {
+	auto generation = catalog.GetCacheGeneration();
+	HMSPartitionSample sample;
+	{
+		lock_guard<mutex> guard(lock);
+		if (complete_plan && IsFresh(complete_plan_loaded_at, complete_plan_generation, generation)) {
+			sample.plan = complete_plan;
+			sample.table_partitions = complete_plan->partitions.size();
+			return sample;
+		}
+		if (sample_plan && IsFresh(sample_plan_loaded_at, sample_plan_generation, generation)) {
+			sample.plan = sample_plan;
+		}
+	}
+	if (!sample.plan) {
+		vector<HMSAPIPartition> partitions;
+		try {
+			partitions = HMSAPI::GetFirstPartitions(context, schema.database, schema.table, catalog.endpoint,
+			                                        static_cast<int16_t>(ESTIMATE_SAMPLE));
+		} catch (std::exception &ex) {
+			if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			return sample;
+		}
+		// Fewer than asked for: that is every partition
+		auto complete = partitions.size() < ESTIMATE_SAMPLE;
+		sample.plan = BuildPlan(context, std::move(partitions), complete);
+		lock_guard<mutex> guard(lock);
+		auto now = std::chrono::steady_clock::now();
+		if (complete) {
+			complete_plan = sample.plan;
+			complete_plan_loaded_at = now;
+			complete_plan_generation = generation;
+		} else {
+			sample_plan = sample.plan;
+			sample_plan_loaded_at = now;
+			sample_plan_generation = generation;
+		}
+	}
+	if (sample.plan->complete) {
+		sample.table_partitions = sample.plan->partitions.size();
+		return sample;
+	}
+	sample.table_partitions = PartitionCount(context);
+	if (!sample.table_partitions.IsValid()) {
+		// The metastore would not count them: the names tell as well
+		try {
+			sample.table_partitions = GetNames(context, generation)->size();
+		} catch (std::exception &ex) {
+			if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+		}
+	}
+	return sample;
 }
 
 shared_ptr<const HMSPartitionPlan> HMSPartitionCache::CompletePlan(ClientContext &context) {

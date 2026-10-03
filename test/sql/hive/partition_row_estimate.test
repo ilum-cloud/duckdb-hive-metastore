@@ -68,3 +68,36 @@ query II
 EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_nonstd WHERE region = 'staging' AND year = 2024;
 ----
 physical_plan	<REGEX>:.*~[1-9][0-9,]* rows.*
+
+# Without a filter the partitions are selected when the scan starts, so that join filters can narrow them down: the
+# estimate comes from the first partitions and the table's partition count. duck_fixture_many_parts has 300
+# partitions without statistics, each estimated at 1,000 rows; planning lists neither names, partitions nor files.
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_many_parts;
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_many_parts;
+----
+physical_plan	<REGEX>:.*~300,000 rows.*
+
+query III
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_partitions db=sample_db table=duck_fixture_many_parts max_parts=32'),
+       count(*) FILTER (WHERE message = 'hive_metastore rpc=get_num_partitions_by_filter db=sample_db table=duck_fixture_many_parts'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partition_names %' OR message LIKE 'hive_metastore rpc=get_partitions_by_%')
+FROM duckdb_logs;
+----
+1	1	0
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP');
+----
+0
+
+statement ok
+CALL disable_logging();

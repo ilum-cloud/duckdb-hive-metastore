@@ -84,13 +84,14 @@ public:
 	                                                vector<unique_ptr<Expression>> &filters) const override;
 	//! Shows the partition locations rather than every expanded file; never selects the partitions
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
-	//! Estimates the rows left to scan from the metastore's statistics, or from the sizes of the data files
+	//! Estimates the rows left to scan from the metastore's statistics, or from the sizes of the data files. Before
+	//! the partitions are selected, from a sample of them: selecting them here would fetch every partition while the
+	//! query is planned, before join filters can narrow them down.
 	unique_ptr<NodeStatistics> GetCardinality(ClientContext &context) const override;
-	//! While the scan binds, answers without selecting the partitions: binding happens before the filters are known
+	//! Answers without selecting or listing partitions: DuckDB asks while binding, before the filters are known, and
+	//! again when the scan starts, of the list bound before join filters narrowed it
 	FileExpandResult GetExpandResult() const override;
 
-	//! The scan finished binding: from now on, a question about the files selects the partitions
-	void FinishBinding() const;
 	//! Whether the table turned out to have no partition registered, so the files under its location are read
 	bool ReadsTableLocation() const;
 
@@ -128,7 +129,8 @@ private:
 	FileGlobInput glob_input;
 
 	mutable State state;
-	mutable bool binding;
+	//! The row estimate made before the partitions were selected
+	mutable optional_idx unresolved_estimate;
 	mutable shared_ptr<const HMSPartitionPlan> plan;
 	//! The partitions still to scan, as indexes into plan->partitions
 	mutable vector<idx_t> partition_indexes;

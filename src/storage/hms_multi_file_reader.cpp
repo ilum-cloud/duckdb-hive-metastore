@@ -78,7 +78,7 @@ static void LogSelection(ClientContext &context, const HMSPartitionSchema &schem
 HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
                                            shared_ptr<HMSScanDiagnostics> diagnostics_p, FileGlobInput glob_input_p)
     : LazyMultiFileList(&context), context(context), cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)),
-      glob_input(std::move(glob_input_p)), state(State::UNRESOLVED), binding(true) {
+      glob_input(std::move(glob_input_p)), state(State::UNRESOLVED) {
 }
 
 HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
@@ -86,13 +86,8 @@ HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HM
                                            shared_ptr<const HMSPartitionPlan> plan_p, vector<idx_t> partition_indexes_p,
                                            ListingMode mode, optional_idx table_partitions_p)
     : LazyMultiFileList(&context), context(context), cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)),
-      glob_input(std::move(glob_input_p)), state(State::PARTITIONS), binding(false), plan(std::move(plan_p)),
+      glob_input(std::move(glob_input_p)), state(State::PARTITIONS), plan(std::move(plan_p)),
       partition_indexes(std::move(partition_indexes_p)), listing_mode(mode), table_partitions(table_partitions_p) {
-}
-
-void HMSPartitionFileList::FinishBinding() const {
-	lock_guard<mutex> guard(lock);
-	binding = false;
 }
 
 bool HMSPartitionFileList::ReadsTableLocation() const {
@@ -412,10 +407,13 @@ bool HMSPartitionFileList::ExpandNextPath() const {
 FileExpandResult HMSPartitionFileList::GetExpandResult() const {
 	{
 		lock_guard<mutex> guard(lock);
-		if (state == State::UNRESOLVED && binding) {
-			// Binding asks only whether there is more than one file, before the filters are known. Selecting the
-			// partitions now would fetch all of them; the answer only tunes the scan, so assume several.
+		// The answer only tunes the scan. Selecting the partitions for it would fetch all of them before the filters
+		// are known, and listing them would list partitions a join filter is about to drop: assume several files.
+		if (state == State::UNRESOLVED) {
 			return FileExpandResult::MULTIPLE_FILES;
+		}
+		if (state == State::PARTITIONS && next_partition == 0 && expanded_files.empty()) {
+			return partition_indexes.empty() ? FileExpandResult::NO_FILES : FileExpandResult::MULTIPLE_FILES;
 		}
 	}
 	return LazyMultiFileList::GetExpandResult();
@@ -439,15 +437,84 @@ vector<OpenFileInfo> HMSPartitionFileList::GetDisplayFileList(optional_idx max_f
 	return result;
 }
 
+//! Rows from the size of the files listed, up to ESTIMATE_FILE_COUNT of them
+static unique_ptr<NodeStatistics> EstimateFromFiles(const MultiFileList &files) {
+	idx_t file_count = 0;
+	idx_t total_size = 0;
+	bool all_sizes = true;
+	MultiFileListScanData scan;
+	files.InitializeScan(scan);
+	OpenFileInfo file;
+	for (; file_count < ESTIMATE_FILE_COUNT && files.Scan(scan, file); file_count++) {
+		if (!file.extended_info) {
+			all_sizes = false;
+			continue;
+		}
+		auto entry = file.extended_info->options.find("file_size");
+		if (entry == file.extended_info->options.end()) {
+			all_sizes = false;
+			continue;
+		}
+		total_size += entry->second.GetValue<uint64_t>();
+	}
+	if (!all_sizes) {
+		return make_uniq<NodeStatistics>(file_count * MIN_ROWS_PER_FILE);
+	}
+	auto estimate = total_size / ESTIMATED_BYTES_PER_ROW;
+	return make_uniq<NodeStatistics>(estimate == 0 && file_count > 0 ? 1 : estimate);
+}
+
+//! Rows from the statistics of a sample of a table's partitions, scaled to all of them. Partitions without statistics
+//! count for MIN_ROWS_PER_FILE: an estimate that is too low could put the table on the build side of a join, where
+//! join filters do not reach it.
+static idx_t EstimateFromSample(const HMSPartitionPlan &sample, idx_t table_partitions) {
+	double rows = 0;
+	idx_t known = 0;
+	for (auto &partition : sample.partitions) {
+		if (partition.row_count.IsValid()) {
+			rows += static_cast<double>(partition.row_count.GetIndex());
+			known++;
+		} else if (partition.total_size.IsValid()) {
+			rows += static_cast<double>(partition.total_size.GetIndex() / ESTIMATED_BYTES_PER_ROW);
+			known++;
+		}
+	}
+	if (known == 0) {
+		return table_partitions * MIN_ROWS_PER_FILE;
+	}
+	return static_cast<idx_t>(rows * static_cast<double>(table_partitions) / static_cast<double>(known));
+}
+
 unique_ptr<NodeStatistics> HMSPartitionFileList::GetCardinality(ClientContext &context_p) const {
+	bool unresolved;
 	{
+		lock_guard<mutex> guard(lock);
+		if (state == State::UNRESOLVED && unresolved_estimate.IsValid()) {
+			return make_uniq<NodeStatistics>(unresolved_estimate.GetIndex());
+		}
+		unresolved = state == State::UNRESOLVED;
+	}
+	if (unresolved) {
+		// The partitions are selected when the scan starts, once join filters are known: estimate from a sample
+		auto sample = cache->SampleForEstimate(context_p);
+		if (sample.plan && !(sample.plan->complete && sample.plan->partitions.empty())) {
+			auto table_partitions =
+			    sample.table_partitions.IsValid() ? sample.table_partitions.GetIndex() : sample.plan->partitions.size();
+			auto estimate = EstimateFromSample(*sample.plan, table_partitions);
+			lock_guard<mutex> guard(lock);
+			unresolved_estimate = estimate;
+			return make_uniq<NodeStatistics>(estimate);
+		}
+		// No partition registered (the files under the table location are read), or the metastore could not be
+		// asked: selecting now costs little more than finding out
 		lock_guard<mutex> guard(lock);
 		if (state == State::UNRESOLVED) {
 			ResolveLocked();
 		}
 	}
 	if (state == State::TABLE_LOCATION) {
-		return table_location_files->GetCardinality(context_p);
+		auto estimate = table_location_files->GetCardinality(context_p);
+		return estimate ? std::move(estimate) : EstimateFromFiles(*table_location_files);
 	}
 	// The scan binds to the table's columns without opening a data file, so DuckDB has no file to estimate from: it
 	// would report 0 rows for a single file. Estimate here instead, first from the statistics the metastore holds
@@ -560,7 +627,6 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 			LogSelection(context_p, schema, selection, 0);
 			auto result = make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input);
 			lock_guard<mutex> guard(result->lock);
-			result->binding = false;
 			result->UseSelectionLocked(selection);
 			return std::move(result);
 		}
@@ -728,11 +794,6 @@ void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &f
 			names.push_back(schema.names[i]);
 			return_types.push_back(schema.types[i]);
 		}
-	}
-	// Binding is the last step that runs before the filters are known
-	auto partition_files = dynamic_cast<HMSPartitionFileList *>(&files);
-	if (partition_files) {
-		partition_files->FinishBinding();
 	}
 }
 
