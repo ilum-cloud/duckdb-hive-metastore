@@ -63,8 +63,16 @@ public:
 	static HMSAPITable FromThrift(const Apache::Hadoop::Hive::Table &table);
 
 	//! Names of all partitions of a table; empty if it has none registered
+	//! Names of the partitions of a table, at most `max_parts` (-1: all); empty if it has none registered
 	static vector<string> GetPartitionNames(ClientContext &ctx, const string &schema, const string &table,
-	                                        const string &endpoint);
+	                                        const string &endpoint, int16_t max_parts = -1);
+	//! Whether the table has a partition registered (one name asked for)
+	static bool HasPartitions(ClientContext &ctx, const string &schema, const string &table, const string &endpoint);
+	//! The partitions a metastore filter selects. Returns false when the metastore refuses the filter, with its reason
+	//! in `rejection`; throws IOException if the metastore cannot be reached.
+	static bool TryGetPartitionsByFilter(ClientContext &ctx, const string &schema, const string &table,
+	                                     const string &filter, const string &endpoint, vector<HMSAPIPartition> &result,
+	                                     string &rejection);
 	//! The named partitions, with the location each one is stored at
 	static vector<HMSAPIPartition> GetPartitions(ClientContext &ctx, const string &schema, const string &table,
 	                                             const vector<string> &partition_names, const string &endpoint);

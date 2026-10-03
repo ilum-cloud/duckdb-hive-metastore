@@ -23,6 +23,11 @@ set -euo pipefail
 #   * duck_fixture_csv_parts / duck_fixture_avro_parts - partitioned text (comma separated) and Avro
 #                            tables, laid out like duck_fixture_nonstd: directories not named
 #                            key=value, one partition outside the table location.
+#   * duck_fixture_pushdown - string, int and date keys, each with a NULL partition, string values that
+#                            collate differently from bytes (a, B, b) and one with a '/', for the
+#                            metastore filter tests.
+#   * duck_fixture_awkward_keys - a key named `date` (a keyword of the metastore's filter grammar) and a
+#                            varchar(10) key (a type the metastore does not filter on).
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -107,6 +112,29 @@ ALTER TABLE sample_db.duck_fixture_avro_parts ADD IF NOT EXISTS
   PARTITION (region='eu')   LOCATION 's3a://test-bucket/duck_fixture_avro_parts/eu'
   PARTITION (region='us')   LOCATION 's3a://test-bucket/duck_fixture_avro_parts/us'
   PARTITION (region='apac') LOCATION 's3a://test-bucket/duck_fixture_avro_elsewhere/apac';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_pushdown (id INT)
+  PARTITIONED BY (s STRING, n INT, d DATE)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_pushdown';
+
+ALTER TABLE sample_db.duck_fixture_pushdown ADD IF NOT EXISTS
+  PARTITION (s='a', n=1, d='2024-01-01')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p1'
+  PARTITION (s='B', n=2, d='2024-01-02')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p2'
+  PARTITION (s='b', n=3, d='2024-01-03')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p3'
+  PARTITION (s='nulls', n=4, d='2024-01-04') LOCATION 's3a://test-bucket/duck_fixture_pushdown/p4'
+  PARTITION (s='c', n=5, d='2024-01-05')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p5'
+  PARTITION (s='d', n=6, d='2024-01-06')     LOCATION 's3a://test-bucket/duck_fixture_pushdown/p6'
+  PARTITION (s='x/y', n=7, d='2024-01-07')   LOCATION 's3a://test-bucket/duck_fixture_pushdown/p7';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_awkward_keys (id INT)
+  PARTITIONED BY (\`date\` STRING, v VARCHAR(10))
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_awkward_keys';
+
+ALTER TABLE sample_db.duck_fixture_awkward_keys ADD IF NOT EXISTS
+  PARTITION (\`date\`='x', v='1') LOCATION 's3a://test-bucket/duck_fixture_awkward_keys/k1'
+  PARTITION (\`date\`='y', v='2') LOCATION 's3a://test-bucket/duck_fixture_awkward_keys/k2';
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it
@@ -147,6 +175,25 @@ SELECT p."PART_ID", k.key, '0'
  WHERE d."NAME" = 'sample_db'
    AND t."TBL_NAME" = 'duck_fixture_nonstd'
 ON CONFLICT ("PART_ID", "PARAM_KEY") DO UPDATE SET "PARAM_VALUE" = EXCLUDED."PARAM_VALUE";
+
+-- duck_fixture_pushdown: one NULL per key, as Hive records them (value and partition name alike)
+UPDATE "PARTITION_KEY_VALS" v
+   SET "PART_KEY_VAL" = '__HIVE_DEFAULT_PARTITION__'
+  FROM "PARTITIONS" p
+  JOIN "TBLS" t ON t."TBL_ID" = p."TBL_ID"
+ WHERE v."PART_ID" = p."PART_ID"
+   AND t."TBL_NAME" = 'duck_fixture_pushdown'
+   AND ((v."INTEGER_IDX" = 0 AND v."PART_KEY_VAL" = 'nulls')
+     OR (v."INTEGER_IDX" = 1 AND v."PART_KEY_VAL" = '5')
+     OR (v."INTEGER_IDX" = 2 AND v."PART_KEY_VAL" = '2024-01-06'));
+UPDATE "PARTITIONS" p
+   SET "PART_NAME" = replace(replace(replace(p."PART_NAME",
+         's=nulls/', 's=__HIVE_DEFAULT_PARTITION__/'),
+         '/n=5/', '/n=__HIVE_DEFAULT_PARTITION__/'),
+         '/d=2024-01-06', '/d=__HIVE_DEFAULT_PARTITION__')
+  FROM "TBLS" t
+ WHERE t."TBL_ID" = p."TBL_ID"
+   AND t."TBL_NAME" = 'duck_fixture_pushdown';
 
 SELECT p."PART_NAME", v."INTEGER_IDX", v."PART_KEY_VAL", s."LOCATION"
   FROM "PARTITIONS" p

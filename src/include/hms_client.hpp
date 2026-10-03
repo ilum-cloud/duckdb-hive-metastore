@@ -38,7 +38,11 @@ public:
 	// Names and types of the tables matching the patterns, across databases, in one call
 	vector<Apache::Hadoop::Hive::TableMeta> GetTableMeta(const string &db_patterns, const string &table_patterns);
 	// Names ("k=v/k=v") of all partitions of a table; empty if the table has none
-	vector<string> GetPartitionNames(const string &db_name, const string &table_name);
+	vector<string> GetPartitionNames(const string &db_name, const string &table_name, int16_t max_parts = -1);
+	// The partitions a metastore filter selects. Returns false when the metastore refuses the filter (it cannot
+	// evaluate it, or the table is gone), with its reason in `rejection`; throws IOException if it cannot be reached.
+	bool TryGetPartitionsByFilter(const string &db_name, const string &table_name, const string &filter,
+	                              vector<Apache::Hadoop::Hive::Partition> &result, string &rejection);
 	// The named partitions, each with its own storage descriptor (and therefore its own location)
 	vector<Apache::Hadoop::Hive::Partition> GetPartitionsByNames(const string &db_name, const string &table_name,
 	                                                             const vector<string> &partition_names);

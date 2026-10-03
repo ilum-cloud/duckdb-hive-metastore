@@ -122,10 +122,46 @@ vector<HMSAPITable> HMSAPI::GetTables(ClientContext &ctx, const string &schema, 
 }
 
 vector<string> HMSAPI::GetPartitionNames(ClientContext &ctx, const string &schema, const string &table,
-                                         const string &endpoint) {
-	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partition_names db=%s table=%s", schema, table);
+                                         const string &endpoint, int16_t max_parts) {
+	if (max_parts < 0) {
+		DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partition_names db=%s table=%s", schema, table);
+	} else {
+		DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partition_names db=%s table=%s max_parts=%d", schema, table,
+		                 max_parts);
+	}
 	auto client = GetClient(endpoint);
-	return client->GetPartitionNames(schema, table);
+	return client->GetPartitionNames(schema, table, max_parts);
+}
+
+bool HMSAPI::HasPartitions(ClientContext &ctx, const string &schema, const string &table, const string &endpoint) {
+	return !GetPartitionNames(ctx, schema, table, endpoint, 1).empty();
+}
+
+static HMSAPIPartition PartitionFromThrift(const Apache::Hadoop::Hive::Partition &partition) {
+	// The response carries no partition name and is not required to preserve the request order, so a caller that
+	// wants one composes it from the table's partition keys and these values.
+	HMSAPIPartition converted;
+	converted.values = vector<string>(partition.values.begin(), partition.values.end());
+	converted.location = partition.sd.location;
+	converted.parameters = partition.parameters;
+	return converted;
+}
+
+bool HMSAPI::TryGetPartitionsByFilter(ClientContext &ctx, const string &schema, const string &table,
+                                      const string &filter, const string &endpoint, vector<HMSAPIPartition> &result,
+                                      string &rejection) {
+	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partitions_by_filter db=%s table=%s filter=%s", schema, table,
+	                 filter);
+	auto client = GetClient(endpoint);
+	vector<Apache::Hadoop::Hive::Partition> partitions;
+	if (!client->TryGetPartitionsByFilter(schema, table, filter, partitions, rejection)) {
+		return false;
+	}
+	result.clear();
+	for (const auto &partition : partitions) {
+		result.push_back(PartitionFromThrift(partition));
+	}
+	return true;
 }
 
 vector<HMSAPIPartition> HMSAPI::GetPartitions(ClientContext &ctx, const string &schema, const string &table,
@@ -144,13 +180,7 @@ vector<HMSAPIPartition> HMSAPI::GetPartitions(ClientContext &ctx, const string &
 		DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_partitions_by_names db=%s table=%s partitions=%d", schema, table,
 		                 batch.size());
 		for (const auto &partition : client->GetPartitionsByNames(schema, table, batch)) {
-			// The response carries no partition name and is not required to preserve the request order, so a
-			// caller that wants one composes it from the table's partition keys and these values.
-			HMSAPIPartition converted;
-			converted.values = vector<string>(partition.values.begin(), partition.values.end());
-			converted.location = partition.sd.location;
-			converted.parameters = partition.parameters;
-			result.push_back(std::move(converted));
+			result.push_back(PartitionFromThrift(partition));
 		}
 	}
 	return result;

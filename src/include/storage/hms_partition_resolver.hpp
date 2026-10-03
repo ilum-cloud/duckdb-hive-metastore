@@ -103,8 +103,33 @@ private:
 	bool IsFresh(time_point loaded_at, idx_t loaded_generation, idx_t generation) const;
 	//! Fetches every partition; caches it, along with the names
 	shared_ptr<const HMSPartitionPlan> FetchComplete(ClientContext &context, idx_t generation);
+	//! The names of every partition, cached
+	shared_ptr<const vector<string>> GetNames(ClientContext &context, idx_t generation);
+	//! Whether the table has a partition registered, from what is cached or else asking for one name
+	bool HasPartitions(ClientContext &context, idx_t generation);
 	//! The selection for a table with no partition registered
 	HMSPartitionSelection NoPartitions(ClientContext &context);
+	//! Selects through the metastore filter; false (with `reason`) when it cannot be used, `refused` telling whether
+	//! the metastore answered with a refusal rather than could not be reached
+	bool SelectByMetastoreFilter(ClientContext &context, idx_t generation, const string &filter,
+	                             HMSPartitionSelection &selection, string &reason, bool &refused);
+	//! The keys whose filters the metastore refused, one flag per partition key
+	vector<bool> RefusedKeys(idx_t generation);
+	//! Remembers that the metastore refused filters on `keys`, and adds them to `excluded`; false if none was new
+	bool RefuseKeys(idx_t generation, const vector<idx_t> &keys, vector<bool> &excluded);
+	//! Selects by evaluating the filters on the partition names, then fetching the partitions kept
+	HMSPartitionSelection SelectByNames(ClientContext &context, idx_t generation,
+	                                    const vector<unique_ptr<Expression>> &filters,
+	                                    const MultiFilePushdownInfo &info,
+	                                    const unordered_map<column_t, idx_t> &partition_columns);
+
+	struct FilterResult {
+		//! The partitions the metastore selected, or null when it refused the filter
+		shared_ptr<const HMSPartitionPlan> plan;
+		string rejection;
+		time_point loaded_at;
+		idx_t generation;
+	};
 
 	HMSCatalog &catalog;
 	const HMSPartitionSchema schema;
@@ -113,6 +138,20 @@ private:
 	shared_ptr<const HMSPartitionPlan> complete_plan;
 	time_point complete_plan_loaded_at;
 	idx_t complete_plan_generation = 0;
+	shared_ptr<const vector<string>> names;
+	time_point names_loaded_at;
+	idx_t names_generation = 0;
+	//! -1 unknown, else whether the table has a partition registered
+	int8_t has_partitions = -1;
+	time_point has_partitions_loaded_at;
+	idx_t has_partitions_generation = 0;
+	//! The metastore's answers to recent filters, most recently used last
+	unordered_map<string, FilterResult> filter_results;
+	vector<string> filter_order;
+	//! The keys whose filters the metastore refused, left out of the filters sent until the TTL expires
+	vector<bool> refused_keys;
+	time_point refused_keys_loaded_at;
+	idx_t refused_keys_generation = 0;
 	//! Whether falling back to the table location for lack of registered partitions was already reported
 	bool warned_no_partitions = false;
 };
