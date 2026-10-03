@@ -172,7 +172,9 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
   regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
 - **A filter on partition columns selects the partitions.** The metastore returns only the partitions that can
   match, and only their locations are listed, 16 at a time. A weak filter that keeps at least half of the table's
-  partitions (and 256 or more) lists the table location once instead, which takes far fewer requests. See
+  partitions (and 256 or more) lists the table location once instead, which takes far fewer requests. So does a
+  selection whose first 16 partitions show the table location holds few enough files: one listing of it, at a
+  request per thousand files, beats the rounds of listings left. See
   [Filters the metastore evaluates](#filters-the-metastore-evaluates).
 - **Only registered partitions are read.** Directories under the table location that no partition points at are
   skipped, and a file belongs to the partition at the deepest location containing it, so a partition nested inside

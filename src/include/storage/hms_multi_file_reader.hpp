@@ -120,8 +120,15 @@ private:
 	void ListTogetherIfCheaper() const;
 	//! Lists the partitions from `position` on, several at once, and keeps the results for ExpandNextPath
 	void PrefetchFrom(idx_t position) const;
-	//! The data files of one partition, from its own listing
-	vector<OpenFileInfo> ListPartition(idx_t partition_index) const;
+	//! The data files of one partition, from its own listing; `keys_listed`: how many keys the listing returned
+	vector<OpenFileInfo> ListPartition(idx_t partition_index, idx_t &keys_listed) const;
+	//! Lists the table location once and keeps, for each of the given positions, the files of its partition
+	void ListPositionsTogether(const vector<idx_t> &positions) const;
+	//! Whether the partition at a position was listed together with the table location
+	bool IsListedTogether(idx_t position) const;
+	//! After the first partitions were listed one by one: lists the rest under the table location together when that
+	//! looks quicker, from how many keys the partitions listed so far held
+	void DecideAdaptiveListing(idx_t position) const;
 	//! Drops files that belong to a partition nested inside this one's location. A partial plan does not know every
 	//! location, so this fetches the complete one when a file lies deeper than the partition's own directory.
 	void DropNestedPartitionFiles(idx_t partition_index, vector<OpenFileInfo> &files) const;
@@ -155,6 +162,11 @@ private:
 	//! partition_indexes, and which positions were listed that way
 	mutable vector<vector<OpenFileInfo>> listed_together;
 	mutable vector<bool> is_listed_together;
+	//! The partitions under the table location listed one by one so far, the keys their listings returned, and
+	//! whether listing the rest together was considered
+	mutable idx_t listed_partitions = 0;
+	mutable idx_t listed_keys = 0;
+	mutable bool adaptive_decided = false;
 	//! Listings done ahead, for positions [prefetched_from, prefetched_from + prefetched.size())
 	mutable vector<vector<OpenFileInfo>> prefetched;
 	mutable idx_t prefetched_from = 0;

@@ -106,7 +106,8 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LI
 ----
 1
 
-# Fewer than 256 partitions are listed one by one, even when they are most of the table's
+# 201 partitions are listed one by one at first. The first 16 hold about one key each, so the table location holds
+# about 300: one listing of it is quicker than 12 more rounds of 16 listings, and lists the remaining 185 partitions.
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -120,7 +121,28 @@ SELECT count(*) FILTER (WHERE regexp_matches(url_decode(request.url), 'prefix=du
        count(*) FILTER (WHERE NOT regexp_matches(url_decode(request.url), 'prefix=duck_fixture_many_parts/p[0-9]+/'))
 FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
 ----
-201	0
+16	1
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore listing % the table location, once, for the remaining 185 partitions: %';
+----
+1
+
+# 20 partitions: after the first round of 16, one round is left, which is no slower than listing the table location
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM hms.sample_db.duck_fixture_many_parts WHERE n BETWEEN 100 AND 119;
+----
+[100]
+
+query II
+SELECT count(*) FILTER (WHERE regexp_matches(url_decode(request.url), 'prefix=duck_fixture_many_parts/p[0-9]+/')),
+       count(*) FILTER (WHERE NOT regexp_matches(url_decode(request.url), 'prefix=duck_fixture_many_parts/p[0-9]+/'))
+FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+20	0
 
 # Without a filter every partition is read, and one listing of the table location is cheaper
 statement ok

@@ -17,6 +17,7 @@
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 
+#include <cmath>
 #include <thread>
 
 namespace duckdb {
@@ -34,6 +35,9 @@ static constexpr idx_t PREFETCH_PARTITIONS = 16;
 //! A filter's selection is listed together with one listing of the table location only from this many partitions on:
 //! fewer cost a few rounds of parallel listings at most
 static constexpr idx_t MIN_PARTITIONS_LISTED_TOGETHER = 256;
+//! How many rounds of partition listings one page of the table location listing costs about as much time as: the
+//! pages come one after another, the rounds of PREFETCH_PARTITIONS listings each run at once
+static constexpr idx_t LISTING_PAGE_ROUNDS = 1;
 
 void HMSScanDiagnostics::Record(const HMSPartitionSelection &selection, idx_t selected_p) {
 	lock_guard<mutex> guard(lock);
@@ -196,7 +200,7 @@ bool HMSPartitionFileList::BelongsTo(const string &path, idx_t partition_index) 
 	return owners && std::find(owners->begin(), owners->end(), partition_index) != owners->end();
 }
 
-vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index) const {
+vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index, idx_t &keys_listed) const {
 	auto &partition = plan->partitions[partition_index];
 	auto &fs = FileSystem::GetFileSystem(context);
 	// One listing of everything under the location; the format's pattern picks the data files from it, else Hive's
@@ -204,6 +208,7 @@ vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index) 
 	// `/**/*` rather than `/**`: on a local file system a trailing `**` skips symlinked files.
 	auto pattern = partition.fallback_scan_location.empty() ? partition.scan_location : partition.location + "/**/*";
 	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
+	keys_listed = files.size();
 	// A partition nested inside this one's location keeps its own files
 	files.erase(std::remove_if(files.begin(), files.end(),
 	                           [&](const OpenFileInfo &file) { return !BelongsTo(file.path, partition_index); }),
@@ -314,12 +319,64 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 	if (!cheaper) {
 		return;
 	}
+	ListPositionsTogether(positions);
+}
+
+bool HMSPartitionFileList::IsListedTogether(idx_t position) const {
+	return !is_listed_together.empty() && is_listed_together[position];
+}
+
+void HMSPartitionFileList::DecideAdaptiveListing(idx_t position) const {
+	// The partitions listed so far tell how many keys the table location holds: when one listing of it takes fewer
+	// pages than the rounds of partition listings left, it is quicker, even though it lists partitions not read
+	adaptive_decided = true;
+	if (listed_partitions == 0) {
+		return;
+	}
+	vector<idx_t> remaining;
+	for (idx_t p = position; p < partition_indexes.size(); p++) {
+		if (!IsListedTogether(p) && plan->IsUnderTableLocation(plan->partitions[partition_indexes[p]])) {
+			remaining.push_back(p);
+		}
+	}
+	auto rounds = (remaining.size() + PREFETCH_PARTITIONS - 1) / PREFETCH_PARTITIONS;
+	if (rounds < 2) {
+		return;
+	}
+	optional_idx partitions_under_location;
+	if (plan->complete) {
+		partitions_under_location = plan->partitions_under_table_location;
+	} else if (table_partitions.IsValid()) {
+		partitions_under_location = table_partitions;
+	} else {
+		partitions_under_location = cache->PartitionCount(context);
+	}
+	if (!partitions_under_location.IsValid()) {
+		return;
+	}
+	auto keys = static_cast<double>(listed_keys) * static_cast<double>(partitions_under_location.GetIndex()) /
+	            static_cast<double>(listed_partitions);
+	auto pages = MaxValue<idx_t>(1, static_cast<idx_t>(std::ceil(keys / KEYS_PER_LISTING_REQUEST)));
+	if (pages * LISTING_PAGE_ROUNDS >= rounds) {
+		return;
+	}
+	auto &schema = cache->Schema();
+	DUCKDB_LOG_DEBUG(context,
+	                 "hive_metastore listing db=%s table=%s the table location, once, for the remaining %d partitions: "
+	                 "about %d keys under it",
+	                 schema.database, schema.table, remaining.size(), static_cast<idx_t>(keys));
+	ListPositionsTogether(remaining);
+}
+
+void HMSPartitionFileList::ListPositionsTogether(const vector<idx_t> &positions) const {
 	unordered_map<idx_t, idx_t> position_of_partition;
 	for (auto position : positions) {
 		position_of_partition[partition_indexes[position]] = position;
 	}
-	listed_together.resize(partition_indexes.size());
-	is_listed_together.resize(partition_indexes.size(), false);
+	if (is_listed_together.empty()) {
+		listed_together.resize(partition_indexes.size());
+		is_listed_together.resize(partition_indexes.size(), false);
+	}
 	for (auto position : positions) {
 		is_listed_together[position] = true;
 	}
@@ -349,13 +406,14 @@ void HMSPartitionFileList::PrefetchFrom(idx_t position) const {
 	auto end = MinValue<idx_t>(position + PREFETCH_PARTITIONS, partition_indexes.size());
 	auto count = end - position;
 	vector<vector<OpenFileInfo>> results(count);
+	vector<idx_t> keys(count, 0);
 	vector<ErrorData> errors(count);
 	auto list = [&](idx_t i) {
-		if (!is_listed_together.empty() && is_listed_together[position + i]) {
+		if (IsListedTogether(position + i)) {
 			return;
 		}
 		try {
-			results[i] = ListPartition(partition_indexes[position + i]);
+			results[i] = ListPartition(partition_indexes[position + i], keys[i]);
 		} catch (std::exception &ex) {
 			errors[i] = ErrorData(ex);
 		}
@@ -380,6 +438,13 @@ void HMSPartitionFileList::PrefetchFrom(idx_t position) const {
 	for (auto &error : errors) {
 		if (error.HasError()) {
 			error.Throw();
+		}
+	}
+	for (idx_t i = 0; i < count; i++) {
+		auto &partition = plan->partitions[partition_indexes[position + i]];
+		if (!IsListedTogether(position + i) && plan->IsUnderTableLocation(partition)) {
+			listed_partitions++;
+			listed_keys += keys[i];
 		}
 	}
 	if (!plan->complete) {
@@ -436,13 +501,17 @@ bool HMSPartitionFileList::ExpandNextPath() const {
 		listing_decided = true;
 		ListTogetherIfCheaper();
 	}
-	if (!is_listed_together.empty() && is_listed_together[position]) {
+	auto prefetched_here = position >= prefetched_from && position < prefetched_from + prefetched.size();
+	if (!IsListedTogether(position) && !prefetched_here && position > 0 && !adaptive_decided) {
+		DecideAdaptiveListing(position);
+	}
+	if (IsListedTogether(position)) {
 		files = SelectDataFiles(plan->partitions[partition_index], std::move(listed_together[position]));
 		if (!plan->complete) {
 			DropNestedPartitionFiles(partition_index, files);
 		}
 	} else {
-		if (position < prefetched_from || position >= prefetched_from + prefetched.size()) {
+		if (!prefetched_here) {
 			PrefetchFrom(position);
 		}
 		files = std::move(prefetched[position - prefetched_from]);
