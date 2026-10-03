@@ -276,7 +276,9 @@ HMSPartitionSelection HMSPartitionCache::ResolveAll(ClientContext &context) {
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			lock_guard<mutex> guard(lock);
-			if (error.Type() == ExceptionType::INTERRUPT || !complete_plan) {
+			// Only an unreachable metastore falls back. A partition value that does not cast, for one, is reported:
+			// falling back would hide every partition added since, for as long as the bad one stays.
+			if (error.Type() != ExceptionType::IO || !complete_plan) {
 				throw;
 			}
 			// The metastore could not be reached: keep scanning the partitions we know until the TTL expires again
@@ -556,18 +558,26 @@ HMSPartitionSelection HMSPartitionCache::ResolveForFilters(ClientContext &contex
 			throw;
 		}
 		// The metastore could not be reached: keep scanning the partitions we know, as ResolveAll does
-		lock_guard<mutex> guard(lock);
-		if (!complete_plan) {
+		shared_ptr<const HMSPartitionPlan> known;
+		{
+			lock_guard<mutex> guard(lock);
+			known = complete_plan;
+		}
+		if (!known) {
 			throw;
 		}
 		DUCKDB_LOG_WARNING(context,
 		                   "hive_metastore: failed to select the partitions of \"%s.%s\", using the cached partition "
 		                   "list: %s",
 		                   schema.database, schema.table, error.RawMessage());
+		if (known->partitions.empty()) {
+			return NoPartitions(context);
+		}
 		HMSPartitionSelection stale;
 		stale.method = HMSPartitionMethod::STALE_PLAN;
-		stale.plan = complete_plan;
+		stale.plan = std::move(known);
 		stale.reason = error.RawMessage();
+		ConfigureStorage(context, *stale.plan);
 		return stale;
 	}
 }
