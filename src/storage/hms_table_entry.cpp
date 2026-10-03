@@ -183,6 +183,26 @@ void HMSTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &, LogicalP
 	throw NotImplementedException("BindUpdateConstraints");
 }
 
+//! The location of the first partition the metastore returns, normalized like a table location; empty when the table
+//! has none registered or the metastore cannot be asked
+static string FirstPartitionPath(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
+                                 const HMSAPITable &table_data, const hms::FormatDetectionResult &format) {
+	vector<HMSAPIPartition> partitions;
+	try {
+		partitions =
+		    HMSAPI::GetFirstPartitions(context, schema.name, table_data.name, catalog.Cast<HMSCatalog>().endpoint, 1);
+	} catch (const std::exception &ex) {
+		if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		return string();
+	}
+	if (partitions.empty() || partitions[0].location.empty()) {
+		return string();
+	}
+	return hms::PathUtils::NormalizeScanPath(partitions[0].location, table_data, format).scan_path;
+}
+
 bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
                                           HMSAPITable &table_data, vector<ColumnDefinition> &columns) {
 	// Detect format
@@ -217,12 +237,8 @@ bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catal
 	auto &function_set = catalog_entry->Cast<TableFunctionCatalogEntry>();
 	scan_function = function_set.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
 
-	// Build glob pattern for directory-based scans (similar to GetScanFunction)
-	string scan_path = path_result.scan_path;
-	scan_path = hms::PathUtils::BuildGlobPattern(scan_path, format_result, format_result.is_partitioned);
-
 	// Bind the function to discover the schema
-	try {
+	auto bind_columns = [&](const string &scan_path) {
 		vector<Value> inputs = {Value(scan_path)};
 		named_parameter_map_t param_map;
 		// Discover the columns the files actually hold. Partition columns are added from the metastore afterwards,
@@ -248,6 +264,33 @@ bool HMSTableEntry::DiscoverDynamicSchema(ClientContext &context, Catalog &catal
 		}
 
 		return true;
+	};
+	try {
+		if (format_result.IsParquet() && !table_data.partition_keys.empty()) {
+			// Read the columns from the files of one partition: globbing the table location lists every file of every
+			// partition, and finds none of a partition stored elsewhere
+			auto partition_path = FirstPartitionPath(context, catalog, schema, table_data, format_result);
+			if (!partition_path.empty()) {
+				try {
+					return bind_columns(hms::PathUtils::BuildPartitionGlobPattern(partition_path, format_result));
+				} catch (const std::exception &ex) {
+					if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+						throw;
+					}
+				}
+				auto &fs = FileSystem::GetFileSystem(context);
+				auto hive_files = fs.GlobFiles(hms::PathUtils::BuildPartitionFallbackGlobPattern(partition_path),
+				                               FileGlobOptions::ALLOW_EMPTY);
+				if (!hive_files.empty()) {
+					// Files without the .parquet extension, which Hive writes: the metastore's columns are used, as
+					// when no Parquet file is found
+					return false;
+				}
+				// The partition holds no file: look at the whole table
+			}
+		}
+		return bind_columns(
+		    hms::PathUtils::BuildGlobPattern(path_result.scan_path, format_result, format_result.is_partitioned));
 	} catch (const std::exception &ex) {
 		// An interrupted query must stop, not fall back to the HMS schema
 		if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {

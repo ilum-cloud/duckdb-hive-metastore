@@ -3,8 +3,9 @@
 # group: [hive]
 
 # Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
-# duck_fixture_hms_types keeps every partition outside the table location, so no file is found there and the
-# columns come from the metastore: id BIGINT, label STRING.
+# duck_fixture_hms_types keeps every partition outside the table location. Its files are named the way Hive names
+# them, without the .parquet extension, so the columns are not read from a file but come from the metastore:
+# id BIGINT, label STRING.
 
 require hive_metastore
 
@@ -19,10 +20,10 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 
 # The files store id as INTEGER
 statement ok
-COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/data.parquet';
+COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/000000_0' (FORMAT parquet);
 
 statement ok
-COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/data.parquet';
+COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/000000_0' (FORMAT parquet);
 
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);

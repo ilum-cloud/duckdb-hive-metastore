@@ -245,9 +245,13 @@ SELECT list(id ORDER BY id) FROM hms_off.sample_db.duck_fixture_pushdown WHERE n
 statement ok
 CALL enable_logging(level='debug', storage='memory');
 
-# An equality on a string key: one request, which the metastore answers with the partition
+# An equality on a string key: one request, which the metastore answers with the partition. The table is resolved
+# first, so only the scan is counted.
 statement ok
 CALL hms_clear_cache();
+
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_pushdown;
 
 statement ok
 CALL truncate_duckdb_logs();

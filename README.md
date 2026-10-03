@@ -272,7 +272,10 @@ The extension loads metadata lazily and caches it per attached catalog:
 
 - **Querying a table** loads only that table: one `get_table` call to the metastore plus, for Parquet, Delta and
   Iceberg tables, schema discovery on that table's own files. The number of other tables in the database does not
-  matter.
+  matter. A partitioned Parquet table reads its columns from a file of the first partition the metastore returns
+  (one `get_partitions` call for one partition), so the table location is not listed; when that partition holds no
+  Parquet file the files under the table location are looked at, and Hive's extension-less files leave the columns to
+  the metastore.
 - **Listing tables** (`SHOW TABLES`, `information_schema`, `duckdb_tables()`, `duckdb_columns()`) loads every table of
   every database in the catalog, including schema discovery, because these views report column information. Tables
   that are already cached and fresh are not loaded again. A table whose metadata cannot be mapped (e.g. a Hive column
