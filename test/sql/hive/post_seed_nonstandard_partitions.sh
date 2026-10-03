@@ -20,6 +20,9 @@ set -euo pipefail
 #                            directory under the table location that no partition points at.
 #   * duck_fixture_values_in_files - declares a partition column but has no partition registered;
 #                            the tests write files that hold the partition values themselves.
+#   * duck_fixture_csv_parts / duck_fixture_avro_parts - partitioned text (comma separated) and Avro
+#                            tables, laid out like duck_fixture_nonstd: directories not named
+#                            key=value, one partition outside the table location.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -83,6 +86,27 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_values_in_files (id I
   PARTITIONED BY (region STRING)
   STORED AS PARQUET
   LOCATION 's3a://test-bucket/duck_fixture_values_in_files';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_csv_parts (id INT, name STRING)
+  PARTITIONED BY (region STRING, year INT)
+  ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+  STORED AS TEXTFILE
+  LOCATION 's3a://test-bucket/duck_fixture_csv_parts';
+
+ALTER TABLE sample_db.duck_fixture_csv_parts ADD IF NOT EXISTS
+  PARTITION (region='eu', year=2024)   LOCATION 's3a://test-bucket/duck_fixture_csv_parts/eu/2024'
+  PARTITION (region='us', year=2024)   LOCATION 's3a://test-bucket/duck_fixture_csv_parts/us/2024'
+  PARTITION (region='apac', year=2025) LOCATION 's3a://test-bucket/duck_fixture_csv_elsewhere/apac_2025';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_avro_parts (id INT, name STRING)
+  PARTITIONED BY (region STRING)
+  STORED AS AVRO
+  LOCATION 's3a://test-bucket/duck_fixture_avro_parts';
+
+ALTER TABLE sample_db.duck_fixture_avro_parts ADD IF NOT EXISTS
+  PARTITION (region='eu')   LOCATION 's3a://test-bucket/duck_fixture_avro_parts/eu'
+  PARTITION (region='us')   LOCATION 's3a://test-bucket/duck_fixture_avro_parts/us'
+  PARTITION (region='apac') LOCATION 's3a://test-bucket/duck_fixture_avro_elsewhere/apac';
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it

@@ -282,6 +282,45 @@ static void ConvertPartitionColumnsToConstants(unique_ptr<Expression> &expr,
 	});
 }
 
+//! Which of the columns the scan produces are partition columns: scan column index -> index into plan.names
+static unordered_map<column_t, idx_t> PartitionColumnIds(const MultiFilePushdownInfo &info,
+                                                         const HMSPartitionPlan &plan) {
+	unordered_map<column_t, idx_t> result;
+	for (idx_t i = 0; i < info.column_ids.size(); i++) {
+		auto column_id = info.column_ids[i];
+		if (IsVirtualColumn(column_id) || column_id >= info.column_names.size()) {
+			continue;
+		}
+		for (idx_t k = 0; k < plan.names.size(); k++) {
+			if (StringUtil::CIEquals(info.column_names[column_id], plan.names[k])) {
+				result[i] = k;
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+enum class PartitionFilterResult : uint8_t {
+	//! The filter needs more than the partition values given, so it can only run over the rows
+	NEEDS_ROWS,
+	PASSES,
+	FAILS
+};
+
+//! Evaluates a filter with the partition columns replaced by the values given
+static PartitionFilterResult EvaluatePartitionFilter(ClientContext &context, const Expression &filter,
+                                                     const unordered_map<column_t, Value> &values, idx_t table_index) {
+	auto filter_copy = filter.Copy();
+	ConvertPartitionColumnsToConstants(filter_copy, values, table_index);
+	Value result;
+	if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
+	    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
+		return PartitionFilterResult::NEEDS_ROWS;
+	}
+	return result.IsNull() || !result.GetValue<bool>() ? PartitionFilterResult::FAILS : PartitionFilterResult::PASSES;
+}
+
 unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientContext &context_p,
                                                                       const MultiFileOptions &options,
                                                                       MultiFilePushdownInfo &info,
@@ -289,20 +328,7 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 	if (filters.empty() || plan->names.empty()) {
 		return nullptr;
 	}
-	// Which of the columns the scan produces are partition columns, and where each one sits in the plan
-	unordered_map<column_t, idx_t> partition_column_ids;
-	for (idx_t i = 0; i < info.column_ids.size(); i++) {
-		auto column_id = info.column_ids[i];
-		if (IsVirtualColumn(column_id) || column_id >= info.column_names.size()) {
-			continue;
-		}
-		for (idx_t k = 0; k < plan->names.size(); k++) {
-			if (StringUtil::CIEquals(info.column_names[column_id], plan->names[k])) {
-				partition_column_ids[i] = k;
-				break;
-			}
-		}
-	}
+	auto partition_column_ids = PartitionColumnIds(info, *plan);
 	if (partition_column_ids.empty()) {
 		return nullptr;
 	}
@@ -319,17 +345,14 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 		}
 		bool prune = false;
 		for (idx_t i = 0; i < filters.size(); i++) {
-			auto filter_copy = filters[i]->Copy();
-			ConvertPartitionColumnsToConstants(filter_copy, partition_values, info.table_index);
-			Value result;
-			if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
-			    !ExpressionExecutor::TryEvaluateScalar(context_p, *filter_copy, result)) {
+			auto result = EvaluatePartitionFilter(context_p, *filters[i], partition_values, info.table_index);
+			if (result == PartitionFilterResult::NEEDS_ROWS) {
 				// The filter needs more than the partition columns, so it must still run over the rows
 				if (!have_preserved_filter[i]) {
 					preserved_filters.push_back(filters[i]->Copy());
 					have_preserved_filter[i] = true;
 				}
-			} else if (result.IsNull() || !result.GetValue<bool>()) {
+			} else if (result == PartitionFilterResult::FAILS) {
 				prune = true;
 				if (filters_applied.find(i) == filters_applied.end()) {
 					info.extra_info.file_filters += filters[i]->ToString();
@@ -351,8 +374,9 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 }
 
 HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
-                                       vector<LogicalType> column_types_p)
-    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)) {
+                                       vector<LogicalType> column_types_p, bool bind_to_table_columns_p)
+    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)),
+      bind_to_table_columns(bind_to_table_columns_p) {
 	D_ASSERT(column_names.size() == column_types.size());
 }
 
@@ -361,11 +385,11 @@ unique_ptr<MultiFileReader> HMSMultiFileReader::CreateInstance(const TableFuncti
 		throw InternalException("HMSMultiFileReader: the scan function carries no partition plan");
 	}
 	auto &info = table_function.function_info->Cast<HMSScanFunctionInfo>();
-	return make_uniq<HMSMultiFileReader>(info.plan, info.column_names, info.column_types);
+	return make_uniq<HMSMultiFileReader>(info.plan, info.column_names, info.column_types, info.bind_to_table_columns);
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::Copy() const {
-	return make_uniq<HMSMultiFileReader>(plan, column_names, column_types);
+	return make_uniq<HMSMultiFileReader>(plan, column_names, column_types, bind_to_table_columns);
 }
 
 shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,
@@ -388,6 +412,10 @@ bool HMSMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, v
 	// Each file is matched to these columns by name instead. A column a file does not have reads as NULL, which is
 	// what Hive does for files written before ALTER TABLE ... ADD COLUMNS. Partition columns are part of the list;
 	// FinalizeBind fills them with constants, so they are never looked up in a file.
+	if (!bind_to_table_columns) {
+		// Files that do not name their columns (CSV): the format binds its own way, BindOptions adds the partitions
+		return false;
+	}
 	for (idx_t i = 0; i < column_names.size(); i++) {
 		auto column = MultiFileColumnDefinition::CreateFromNameAndType(column_names[i], column_types[i]);
 		column.default_expression = make_uniq<ConstantExpression>(Value(column_types[i]));
@@ -407,6 +435,82 @@ void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &f
 	options.hive_partitioning = false;
 	options.hive_types_schema.clear();
 	MultiFileReader::BindOptions(options, files, return_types, names, bind_data);
+
+	// When the format bound its own way (CSV), add the partition columns, in the order the metastore declares them,
+	// as the table does. Bound to the table's columns, they are there already.
+	for (idx_t i = 0; i < plan->names.size(); i++) {
+		bool found = false;
+		for (idx_t col = 0; col < names.size(); col++) {
+			if (StringUtil::CIEquals(names[col], plan->names[i])) {
+				return_types[col] = plan->types[i];
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			names.push_back(plan->names[i]);
+			return_types.push_back(plan->types[i]);
+		}
+	}
+}
+
+unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
+                                                                    const MultiFileOptions &options,
+                                                                    MultiFilePushdownInfo &info,
+                                                                    vector<unique_ptr<Expression>> &filters) {
+	if (plan->source != HMSPartitionSource::PATH) {
+		// The partition list prunes on the values the metastore holds
+		return MultiFileReader::ComplexFilterPushdown(context, files, options, info, filters);
+	}
+	// Path mode: drop the files whose key=value path values cannot satisfy the filters, before they are opened. A value
+	// the path does not carry may come from the file itself, so that says nothing, and every filter still runs over
+	// the rows of the files kept.
+	if (filters.empty() || plan->names.empty()) {
+		return nullptr;
+	}
+	auto partition_column_ids = PartitionColumnIds(info, *plan);
+	if (partition_column_ids.empty()) {
+		return nullptr;
+	}
+	auto all_files = files.GetAllFiles();
+	vector<OpenFileInfo> kept;
+	unordered_set<idx_t> filters_applied;
+	for (auto &file : all_files) {
+		auto path_values = HivePartitioning::Parse(file.path);
+		unordered_map<column_t, Value> values;
+		for (auto &entry : partition_column_ids) {
+			auto path_value = path_values.find(plan->names[entry.second]);
+			if (path_value == path_values.end()) {
+				continue;
+			}
+			try {
+				values[entry.first] = HivePartitioning::GetValue(context, plan->names[entry.second], path_value->second,
+				                                                 plan->types[entry.second]);
+			} catch (std::exception &) {
+				// A value that does not convert is reported when the file is read
+			}
+		}
+		bool prune = false;
+		for (idx_t i = 0; !values.empty() && i < filters.size(); i++) {
+			if (EvaluatePartitionFilter(context, *filters[i], values, info.table_index) ==
+			    PartitionFilterResult::FAILS) {
+				prune = true;
+				if (filters_applied.insert(i).second) {
+					info.extra_info.file_filters += filters[i]->ToString();
+				}
+				break;
+			}
+		}
+		if (!prune) {
+			kept.push_back(file);
+		}
+	}
+	if (kept.size() == all_files.size()) {
+		return nullptr;
+	}
+	info.extra_info.total_files = all_files.size();
+	info.extra_info.filtered_files = kept.size();
+	return make_uniq<SimpleMultiFileList>(std::move(kept));
 }
 
 vector<Value> HMSMultiFileReader::ValuesForFile(ClientContext &context, const BaseFileReader &reader,

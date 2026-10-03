@@ -1,0 +1,73 @@
+# name: test/sql/avro/partitioned_avro.test
+# description: A partitioned Avro table is read through its registered partitions, with each file matched to the table's columns by name
+# group: [avro]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_avro_parts: partitioned by region, directories not named key=value, and the 'apac' partition outside
+# the table location.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require-env REMOTE_EXTENSIONS
+
+require httpfs
+
+require parquet
+
+# Disable skipping of HTTP errors to see actual failure messages
+set ignore_error_messages
+
+statement ok
+FORCE INSTALL avro; LOAD avro;
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a')) t(id, name)) TO 's3://test-bucket/duck_fixture_avro_parts/eu/000000_0' (FORMAT avro);
+
+# Same columns, stored the other way round
+statement ok
+COPY (SELECT * FROM (VALUES ('b', 2)) t(name, id)) TO 's3://test-bucket/duck_fixture_avro_parts/us/000000_0' (FORMAT avro);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 'c')) t(id, name)) TO 's3://test-bucket/duck_fixture_avro_elsewhere/apac/000000_0' (FORMAT avro);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_avro_parts') ORDER BY cid;
+----
+id	INTEGER
+name	VARCHAR
+region	VARCHAR
+
+query ITT
+SELECT * FROM hms.sample_db.duck_fixture_avro_parts ORDER BY id;
+----
+1	a	eu
+2	b	us
+3	c	apac
+
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_avro_parts WHERE region = 'us';
+----
+2	b
+
+# Spark's own Avro format, from the Spark seed (test/seed_hive_data_spark.py, step 14): 4 rows in the partitions eu, us
+# and apac, apac stored outside the table location
+query ITT
+SELECT id, name, region FROM hms.sample_db.duck_fixture_spark_avro_parts ORDER BY id;
+----
+1	alice	eu
+2	bob	eu
+3	carol	us
+4	dave	apac
+
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_spark_avro_parts WHERE region = 'apac';
+----
+4	dave

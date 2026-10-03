@@ -22,13 +22,17 @@ static constexpr const char *HMS_PARTITION_INDEX_KEY = "hms_partition_index";
 //! plan, and the entry's columns, which the scan must produce in exactly that order
 struct HMSScanFunctionInfo : public TableFunctionInfo {
 	HMSScanFunctionInfo(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
-	                    vector<LogicalType> column_types_p)
-	    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)) {
+	                    vector<LogicalType> column_types_p, bool bind_to_table_columns_p)
+	    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)),
+	      bind_to_table_columns(bind_to_table_columns_p) {
 	}
 
 	shared_ptr<const HMSPartitionPlan> plan;
 	vector<string> column_names;
 	vector<LogicalType> column_types;
+	//! Whether the scan binds to these columns and matches files to them by name (files that name their columns),
+	//! rather than binding the format's own way and getting the partition columns appended (CSV)
+	bool bind_to_table_columns;
 };
 
 //! The files of one partitioned table, one partition at a time. Each partition is globbed at its own location, so
@@ -83,7 +87,7 @@ private:
 class HMSMultiFileReader : public MultiFileReader {
 public:
 	HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan, vector<string> column_names,
-	                   vector<LogicalType> column_types);
+	                   vector<LogicalType> column_types, bool bind_to_table_columns);
 
 	static unique_ptr<MultiFileReader> CreateInstance(const TableFunction &table_function);
 
@@ -93,6 +97,10 @@ public:
 	          MultiFileReaderBindData &bind_data) override;
 	void BindOptions(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
 	                 vector<string> &names, MultiFileReaderBindData &bind_data) override;
+	//! In path mode, drops the files whose key=value path values cannot satisfy the filters
+	unique_ptr<MultiFileList> ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
+	                                                const MultiFileOptions &options, MultiFilePushdownInfo &info,
+	                                                vector<unique_ptr<Expression>> &filters) override;
 	void FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
@@ -108,6 +116,7 @@ private:
 	//! The columns of the table entry, partition columns included, in the entry's order
 	vector<string> column_names;
 	vector<LogicalType> column_types;
+	bool bind_to_table_columns;
 };
 
 } // namespace duckdb

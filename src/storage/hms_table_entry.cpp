@@ -133,9 +133,9 @@ bool HMSTableEntry::HasSameColumns(const HMSTableEntry &other) const {
 }
 
 bool HMSTableEntry::InjectsPartitionColumns(const HMSAPITable &table, const hms::FormatDetectionResult &format) {
-	// Delta and Iceberg keep their own partition metadata and are read by their own extensions. CSV and Avro are not
-	// covered yet: their partition columns are missing today as well, and their scans need separate work.
-	return !table.partition_keys.empty() && !format.IsDelta() && !format.IsIceberg() && format.IsParquet();
+	// Delta and Iceberg keep their own partition metadata and are read by their own extensions
+	return !table.partition_keys.empty() && !format.IsDelta() && !format.IsIceberg() &&
+	       (format.IsParquet() || format.IsCSV() || format.IsAvro());
 }
 
 //! The name the metastore uses for a partition, rebuilt from the partition keys and values
@@ -492,8 +492,12 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 			column_names.push_back(column.Name());
 			column_types.push_back(column.Type());
 		}
-		scan_function.function_info =
-		    make_shared_ptr<HMSScanFunctionInfo>(partition_plan, std::move(column_names), std::move(column_types));
+		// Parquet and Avro files name their columns, so the scan produces the table's columns and matches each file to
+		// them by name. CSV files do not: the CSV scan takes its columns from the columns parameter set below, which is
+		// built from the same list as the table's, and gets the partition columns appended.
+		auto bind_to_table_columns = !format_result.IsCSV();
+		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(
+		    partition_plan, std::move(column_names), std::move(column_types), bind_to_table_columns);
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 	}
 
@@ -507,15 +511,29 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		vector<HMSAPIColumnDefinition> columns;
 		bool has_spark_schema = HMSUtils::ParseSparkSchema(table_data->parameters, columns);
 
+		// The partition columns are not in the files of a partitioned table: the partition reader appends them. Spark's
+		// schema lists them, last, so leave them out of what the files are parsed as.
+		case_insensitive_set_t partition_columns;
+		if (InjectsPartitionColumns(*table_data, format_result)) {
+			for (const auto &partition_key : table_data->partition_keys) {
+				partition_columns.insert(partition_key.name);
+			}
+		}
 		if (has_spark_schema) {
 			// Successfully parsed Spark schema, use it.
 			// The types in 'columns' are already DuckDB LogicalType strings from ParseSparkSchema
 			for (const auto &col : columns) {
+				if (partition_columns.count(col.name)) {
+					continue;
+				}
 				struct_children.push_back(make_pair(col.name, Value(col.type)));
 			}
 		} else {
 			// Fallback to standard HMS columns
 			for (const auto &col : table_data->columns) {
+				if (partition_columns.count(col.name)) {
+					continue;
+				}
 				// Convert HMS type to DuckDB LogicalType string
 				auto duckdb_type = HMSUtils::TypeToLogicalType(context, col.type);
 				struct_children.push_back(make_pair(col.name, Value(duckdb_type.ToString())));

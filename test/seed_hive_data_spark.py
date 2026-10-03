@@ -403,25 +403,25 @@ def main():
     print("=" * 80)
 
     # Create Spark session
-    print("\n[1/13] Creating Spark session with Hive and S3 support...")
+    print("\n[1/14] Creating Spark session with Hive and S3 support...")
     spark = create_spark_session()
     print("✓ Spark session created successfully")
 
     # Create database
-    print("\n[2/13] Creating database 'sample_db'...")
+    print("\n[2/14] Creating database 'sample_db'...")
     spark.sql("CREATE DATABASE IF NOT EXISTS sample_db")
     spark.sql("USE sample_db")
     print("✓ Database 'sample_db' created and selected")
 
     # Create and save Customers table (Parquet - default format)
-    print("\n[3/13] Creating 'customers' table in Parquet format...")
+    print("\n[3/14] Creating 'customers' table in Parquet format...")
     customers_df = create_sample_customers_data(spark, num_rows=100)
     customers_df.write.mode("overwrite").format("parquet").saveAsTable("sample_db.customers")
     print(f"✓ Created 'customers' table with {customers_df.count()} rows in Parquet format")
     print(f"   Location: s3a://test-bucket/sample_db.db/customers/")
 
     # Create and save Products table (Delta format)
-    print("\n[4/13] Creating 'products' table in Delta format...")
+    print("\n[4/14] Creating 'products' table in Delta format...")
     products_df = create_sample_products_data(spark, num_rows=50)
 
     # Drop table if exists to avoid truncate mode issues with Delta
@@ -441,7 +441,7 @@ def main():
     print(f"   Location: {delta_path}")
 
     # Create and save Orders table (CSV format)
-    print("\n[5/13] Creating 'orders' table in CSV format...")
+    print("\n[5/14] Creating 'orders' table in CSV format...")
     orders_df = create_sample_orders_data(spark, num_rows=200)
 
     # First save as CSV to S3
@@ -469,14 +469,14 @@ def main():
     print(f"   Location: {csv_path}")
 
     # Create and save Reviews table (Parquet with partitioning)
-    print("\n[6/13] Creating 'reviews' table in Parquet format with partitioning...")
+    print("\n[6/14] Creating 'reviews' table in Parquet format with partitioning...")
     reviews_df = create_sample_reviews_data(spark, num_rows=150)
     reviews_df.write.mode("overwrite").format("parquet").partitionBy("rating").saveAsTable("sample_db.reviews")
     print(f"✓ Created 'reviews' table with {reviews_df.count()} rows in Parquet format (partitioned by rating)")
     print(f"   Location: s3a://test-bucket/sample_db.db/reviews/")
 
     # Create and save Inventory table (Iceberg format) - if Iceberg is available
-    print("\n[7/13] Creating 'inventory' table in Iceberg format...")
+    print("\n[7/14] Creating 'inventory' table in Iceberg format...")
     try:
         inventory_df = create_sample_inventory_data(spark, num_rows=75)
 
@@ -502,7 +502,7 @@ def main():
         traceback.print_exc()
 
     # Create and save Shipments table (Avro format)
-    print("\n[8/13] Creating 'shipments' table in Avro format...")
+    print("\n[8/14] Creating 'shipments' table in Avro format...")
     try:
         shipments_df = create_sample_shipments_data(spark, num_rows=80)
 
@@ -529,7 +529,7 @@ def main():
         print(f"⚠ Skipped 'shipments' table (Avro): {str(e)[:100]}")
 
     # Create and save type_test table (Parquet with diverse types)
-    print("\n[9/13] Creating 'type_test' table in Parquet format with diverse types...")
+    print("\n[9/14] Creating 'type_test' table in Parquet format with diverse types...")
     type_test_df = create_sample_type_test_data(spark, num_rows=100)
     type_test_df.write.mode("overwrite").format("parquet").saveAsTable("sample_db.type_test")
     print(f"✓ Created 'type_test' table with {type_test_df.count()} rows in Parquet format")
@@ -538,7 +538,7 @@ def main():
     print("          BOOLEAN, TIMESTAMP, BINARY, VARCHAR")
 
     # Create and save decimal_partitioned table (Parquet partitioned by DECIMAL)
-    print("\n[10/13] Creating 'decimal_partitioned' table in Parquet format (partitioned by DECIMAL)...")
+    print("\n[10/14] Creating 'decimal_partitioned' table in Parquet format (partitioned by DECIMAL)...")
     decimal_partitioned_df = create_sample_decimal_partitioned_data(spark, num_rows=50)
     decimal_partitioned_df.write.mode("overwrite").format("parquet").partitionBy("amount").saveAsTable(
         "sample_db.decimal_partitioned"
@@ -548,7 +548,7 @@ def main():
     print("   Partitioned by: amount (DECIMAL(10,2)) - tests problematic partition type")
 
     # Create and save multi_partition table (Parquet partitioned by multiple columns)
-    print("\n[11/13] Creating 'multi_partition' table in Parquet format (partitioned by year, month, region)...")
+    print("\n[11/14] Creating 'multi_partition' table in Parquet format (partitioned by year, month, region)...")
     multi_partition_df = create_sample_multi_partition_data(spark, num_rows=60)
     multi_partition_df.write.mode("overwrite").format("parquet").partitionBy("year", "month", "region").saveAsTable(
         "sample_db.multi_partition"
@@ -560,7 +560,7 @@ def main():
     # Empty external Parquet table for DuckDB write-path tests (used by test/sql/s3/insert_s3a_rewrite.test).
     # Location is intentionally outside sample_db.db/ — this is an external table used as a
     # DuckDB write target, not a warehouse-managed table.
-    print("\n[12/13] Creating EMPTY 'spark_writable_parquet' for DuckDB write-tests...")
+    print("\n[12/14] Creating EMPTY 'spark_writable_parquet' for DuckDB write-tests...")
     writable_path = "s3a://test-bucket/spark_writable_parquet/"
 
     # Clear any prior files at the writable path so the table truly starts empty.
@@ -604,9 +604,9 @@ def main():
     print("✓ Created empty 'spark_writable_parquet' (target for DuckDB INSERT tests)")
     print(f"   Location: {writable_path}")
 
-    # [13/13] Seeded Parquet table that DuckDB INSERTs additional rows into,
+    # [13/14] Seeded Parquet table that DuckDB INSERTs additional rows into,
     # exercising the cross-engine append path.
-    print("\n[13/13] Creating 'cross_engine_parquet' table (Parquet, 10 Spark-written rows)...")
+    print("\n[13/14] Creating 'cross_engine_parquet' table (Parquet, 10 Spark-written rows)...")
     cross_data = [(i, f"spark_row_{i}", float(i) * 1.5) for i in range(1, 11)]
     cross_schema = StructType(
         [
@@ -642,6 +642,62 @@ def main():
     """)
     print(f"✓ Created 'cross_engine_parquet' table with 10 rows (Spark-written, DuckDB will INSERT more)")
     print(f"   Location: {cross_path}")
+
+    # [14/14] Partitioned tables in the formats besides Parquet, as Spark writes them: its own CSV and Avro tables and
+    # a Hive text table (Hive's default \001 delimiter), each with one partition kept outside the table location.
+    # Spark stores a CSV table with a placeholder location and the real one in the serde's path parameter, which
+    # duck_fixture_spark_csv_external (not partitioned) covers on its own. Named duck_ so the table listing tests
+    # skip them, like the other fixtures.
+    print("\n[14/14] Creating partitioned CSV, text and Avro tables written by Spark...")
+
+    def clear_path(path):
+        try:
+            hadoop_conf = spark._jsc.hadoopConfiguration()
+            fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jvm.java.net.URI.create(path), hadoop_conf)
+            hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(path)
+            if fs.exists(hadoop_path):
+                fs.delete(hadoop_path, True)
+        except Exception as cleanup_err:
+            print(f"   (warn) failed to clear {path}: {cleanup_err}")
+
+    partitioned_tables = [
+        (
+            "duck_fixture_spark_csv_parts",
+            "TABLE",
+            "(id INT, name STRING, region STRING) USING csv PARTITIONED BY (region)",
+        ),
+        (
+            "duck_fixture_spark_text_parts",
+            "EXTERNAL TABLE",
+            "(id INT, name STRING) PARTITIONED BY (region STRING) STORED AS TEXTFILE",
+        ),
+        (
+            "duck_fixture_spark_avro_parts",
+            "TABLE",
+            "(id INT, name STRING, region STRING) USING avro PARTITIONED BY (region)",
+        ),
+    ]
+    for name, kind, definition in partitioned_tables:
+        location = f"s3a://test-bucket/{name}"
+        elsewhere = f"s3a://test-bucket/{name}_elsewhere"
+        spark.sql(f"DROP TABLE IF EXISTS sample_db.{name}")
+        clear_path(location)
+        clear_path(elsewhere)
+        spark.sql(f"CREATE {kind} sample_db.{name} {definition} LOCATION '{location}'")
+        spark.sql(f"INSERT INTO sample_db.{name} PARTITION (region='eu') VALUES (1, 'alice'), (2, 'bob')")
+        spark.sql(f"INSERT INTO sample_db.{name} PARTITION (region='us') VALUES (3, 'carol')")
+        spark.sql(f"ALTER TABLE sample_db.{name} ADD PARTITION (region='apac') LOCATION '{elsewhere}/apac'")
+        spark.sql(f"INSERT INTO sample_db.{name} PARTITION (region='apac') VALUES (4, 'dave')")
+        print(f"✓ Created '{name}' (4 rows in 3 partitions, 'apac' outside the table location)")
+
+    external_csv = "s3a://test-bucket/duck_fixture_spark_csv_external"
+    spark.sql("DROP TABLE IF EXISTS sample_db.duck_fixture_spark_csv_external")
+    clear_path(external_csv)
+    spark.sql(
+        f"CREATE TABLE sample_db.duck_fixture_spark_csv_external (id INT, name STRING) USING csv LOCATION '{external_csv}'"
+    )
+    spark.sql("INSERT INTO sample_db.duck_fixture_spark_csv_external VALUES (1, 'alice'), (2, 'bob')")
+    print("✓ Created 'duck_fixture_spark_csv_external' (2 rows, Spark CSV table with its own location)")
 
     # NOTE: The oss:// and cos:// rewrite tests (test/sql/s3/insert_oss_cos_rewrite.test)
     # create their own tables inside the test rather than seeding here. Spark's bundled
