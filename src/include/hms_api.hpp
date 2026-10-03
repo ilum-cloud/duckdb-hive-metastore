@@ -48,6 +48,8 @@ struct HMSAPIPartition {
 class HMSAPI {
 public:
 	static vector<HMSAPISchema> GetSchemas(ClientContext &ctx, const string &endpoint);
+	//! One schema, or nullptr if it does not exist
+	static unique_ptr<HMSAPISchema> GetSchema(ClientContext &ctx, const string &schema, const string &endpoint);
 	//! Names of all tables in a schema
 	static vector<string> GetTableNames(ClientContext &ctx, const string &schema, const string &endpoint);
 	//! Names of all tables in all schemas, keyed by schema name (a single metastore call)

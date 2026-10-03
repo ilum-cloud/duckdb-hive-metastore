@@ -69,17 +69,24 @@ vector<string> HMSClient::GetAllTables(const string &db_name) {
 }
 
 Apache::Hadoop::Hive::Database HMSClient::GetDatabase(const string &db_name) {
+	Apache::Hadoop::Hive::Database db;
+	if (!TryGetDatabase(db_name, db)) {
+		throw IOException("Database '%s' not found", db_name);
+	}
+	return db;
+}
+
+bool HMSClient::TryGetDatabase(const string &db_name, Apache::Hadoop::Hive::Database &result) {
 	if (!connected)
 		Open();
-	Apache::Hadoop::Hive::Database db;
 	try {
-		client->get_database(db, db_name);
-	} catch (Apache::Hadoop::Hive::NoSuchObjectException &e) {
-		throw IOException("Database '%s' not found: %s", db_name, e.message);
+		client->get_database(result, db_name);
+		return true;
+	} catch (Apache::Hadoop::Hive::NoSuchObjectException &) {
+		return false;
 	} catch (apache::thrift::TException &tx) {
 		throw IOException("Failed to get database '%s': %s", db_name, tx.what());
 	}
-	return db;
 }
 
 bool HMSClient::TryGetTable(const string &db_name, const string &table_name, Apache::Hadoop::Hive::Table &result) {

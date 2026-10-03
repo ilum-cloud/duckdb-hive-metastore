@@ -24,11 +24,15 @@ public:
 
 protected:
 	bool SupportsPointLookup() const override {
-		return false;
+		return true;
 	}
+	HMSLoadResult LoadEntry(ClientContext &context, const string &name, optional_ptr<CatalogEntry> cached) override;
 	vector<string> ListEntryNames(ClientContext &context) override;
 	void LoadEntries(ClientContext &context, const vector<pair<string, optional_ptr<CatalogEntry>>> &requests,
 	                 const std::function<void(const string &name, HMSLoadResult result)> &on_loaded) override;
+
+private:
+	unique_ptr<HMSSchemaEntry> MakeSchemaEntry(const string &name);
 };
 
 } // namespace duckdb
