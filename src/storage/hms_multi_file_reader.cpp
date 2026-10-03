@@ -4,12 +4,18 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/filter/conjunction_filter.hpp"
+#include "duckdb/planner/filter/optional_filter.hpp"
+#include "duckdb/planner/table_filter.hpp"
 
 #include <thread>
 
@@ -67,12 +73,53 @@ InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &
 	return result;
 }
 
+static void DescribeSelection(const HMSScanDiagnostics &selection, bool dynamic,
+                              InsertionOrderPreservingMap<string> &result) {
+	lock_guard<mutex> guard(selection.lock);
+	if (!selection.recorded) {
+		return;
+	}
+	if (selection.method == HMSPartitionMethod::PATH) {
+		result["HMS Partitions"] = "none registered, the files under the table location are read";
+	} else {
+		result["HMS Partitions"] = StringUtil::Format(
+		    "%llu (%s%s)", selection.selected, HMSPartitionMethodName(selection.method), dynamic ? ", dynamic" : "");
+	}
+	if (!selection.hms_filter.empty()) {
+		result["HMS Partition Filter"] = selection.hms_filter;
+	}
+	if (!selection.reason.empty()) {
+		result["HMS Partition Fallback"] = selection.reason;
+	}
+}
+
+InsertionOrderPreservingMap<string> HMSScanDynamicToString(TableFunctionDynamicToStringInput &input) {
+	auto &info = input.table_function.function_info->Cast<HMSScanFunctionInfo>();
+	InsertionOrderPreservingMap<string> result;
+	if (info.base_dynamic_to_string) {
+		result = info.base_dynamic_to_string(input);
+	}
+	if (!input.global_state || info.cache->Mode() == HMSPartitionMode::PATH) {
+		return result;
+	}
+	// The list the scan read: one made from join filters when the scan started, else the one planned
+	auto &global_state = input.global_state->Cast<MultiFileGlobalState>();
+	auto files = dynamic_cast<const HMSPartitionFileList *>(&global_state.file_list);
+	auto dynamic_selection = files ? files->DynamicSelection() : nullptr;
+	if (dynamic_selection) {
+		DescribeSelection(*dynamic_selection, true, result);
+	} else {
+		DescribeSelection(*info.diagnostics, false, result);
+	}
+	return result;
+}
+
 static void LogSelection(ClientContext &context, const HMSPartitionSchema &schema,
-                         const HMSPartitionSelection &selection, idx_t selected) {
+                         const HMSPartitionSelection &selection, idx_t selected, bool dynamic = false) {
 	DUCKDB_LOG_DEBUG(context,
-	                 "hive_metastore partitions db=%s table=%s method=%s selected=%d filter=\"%s\" reason=\"%s\"",
+	                 "hive_metastore partitions db=%s table=%s method=%s selected=%d filter=\"%s\" reason=\"%s\"%s",
 	                 schema.database, schema.table, HMSPartitionMethodName(selection.method), selected,
-	                 selection.hms_filter, selection.reason);
+	                 selection.hms_filter, selection.reason, dynamic ? " dynamic=1" : "");
 }
 
 HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
@@ -581,6 +628,18 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
                                                                       const MultiFileOptions &options,
                                                                       MultiFilePushdownInfo &info,
                                                                       vector<unique_ptr<Expression>> &filters) const {
+	return PushdownFilters(context_p, info, filters, false);
+}
+
+const HMSScanDiagnostics *HMSPartitionFileList::DynamicSelection() const {
+	lock_guard<mutex> guard(dynamic_selection.lock);
+	return dynamic_selection.recorded ? &dynamic_selection : nullptr;
+}
+
+unique_ptr<HMSPartitionFileList> HMSPartitionFileList::PushdownFilters(ClientContext &context_p,
+                                                                       MultiFilePushdownInfo &info,
+                                                                       vector<unique_ptr<Expression>> &filters,
+                                                                       bool dynamic) const {
 	auto &schema = cache->Schema();
 	if (filters.empty() || schema.names.empty()) {
 		return nullptr;
@@ -623,12 +682,17 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 		}
 		selection = cache->ResolveForFilters(context_p, filters, info, partition_column_ids);
 		if (!selection.plan) {
-			diagnostics->Record(selection, 0);
-			LogSelection(context_p, schema, selection, 0);
+			if (!dynamic) {
+				diagnostics->Record(selection, 0);
+			}
+			LogSelection(context_p, schema, selection, 0, dynamic);
 			auto result = make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input);
+			if (dynamic) {
+				result->dynamic_selection.Record(selection, 0);
+			}
 			lock_guard<mutex> guard(result->lock);
 			result->UseSelectionLocked(selection);
-			return std::move(result);
+			return result;
 		}
 		current_plan = selection.plan;
 		current_indexes.clear();
@@ -672,12 +736,21 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 			kept.push_back(partition_index);
 		}
 	}
-	if (resolved_now) {
-		diagnostics->Record(selection, kept.size());
-		LogSelection(context_p, schema, selection, kept.size());
-	}
 	if (!resolved_now && kept.size() == current_indexes.size()) {
 		return nullptr;
+	}
+	if (dynamic && !resolved_now) {
+		// Selected while planning, from static filters: the join filters narrow that selection down
+		lock_guard<mutex> guard(diagnostics->lock);
+		selection.method = diagnostics->method;
+		selection.hms_filter = diagnostics->hms_filter;
+		selection.reason = "the join filters narrowed down the partitions selected while planning";
+	}
+	if (resolved_now || dynamic) {
+		if (!dynamic) {
+			diagnostics->Record(selection, kept.size());
+		}
+		LogSelection(context_p, schema, selection, kept.size(), dynamic);
 	}
 	if (kept.size() < current_indexes.size()) {
 		if (current_plan->complete) {
@@ -712,8 +785,13 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 			}
 		}
 	}
-	return make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input, current_plan, std::move(kept),
-	                                       mode, table_partitions);
+	auto selected = kept.size();
+	auto result = make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input, current_plan,
+	                                              std::move(kept), mode, table_partitions);
+	if (dynamic) {
+		result->dynamic_selection.Record(selection, selected);
+	}
+	return result;
 }
 
 HMSMultiFileReader::HMSMultiFileReader(shared_ptr<HMSPartitionCache> cache_p,
@@ -818,7 +896,103 @@ unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContex
 	return result;
 }
 
-unique_ptr<MultiFileList> HMSMultiFileReader::PrunePathFiles(ClientContext &context, MultiFileList &files,
+//! A filter DuckDB pushed into the scan, as an expression over `column`; null when it says nothing usable. Join filters
+//! wrap the key range and IN list as optional filters; a bloom filter or a top-N bound cannot select partitions.
+static unique_ptr<Expression> TableFilterToExpression(const TableFilter &filter, const Expression &column) {
+	switch (filter.filter_type) {
+	case TableFilterType::OPTIONAL_FILTER: {
+		auto &optional = filter.Cast<OptionalFilter>();
+		return optional.child_filter ? TableFilterToExpression(*optional.child_filter, column) : nullptr;
+	}
+	case TableFilterType::BLOOM_FILTER:
+	case TableFilterType::DYNAMIC_FILTER:
+		return nullptr;
+	case TableFilterType::CONJUNCTION_AND:
+	case TableFilterType::CONJUNCTION_OR: {
+		auto is_and = filter.filter_type == TableFilterType::CONJUNCTION_AND;
+		auto &child_filters = is_and ? filter.Cast<ConjunctionAndFilter>().child_filters
+		                             : filter.Cast<ConjunctionOrFilter>().child_filters;
+		auto result = make_uniq<BoundConjunctionExpression>(is_and ? ExpressionType::CONJUNCTION_AND
+		                                                           : ExpressionType::CONJUNCTION_OR);
+		for (auto &child : child_filters) {
+			auto converted = TableFilterToExpression(*child, column);
+			if (converted) {
+				result->children.push_back(std::move(converted));
+			} else if (!is_and) {
+				// A part that says nothing makes the whole OR say nothing
+				return nullptr;
+			}
+		}
+		if (result->children.empty()) {
+			return nullptr;
+		}
+		if (result->children.size() == 1) {
+			return std::move(result->children[0]);
+		}
+		return std::move(result);
+	}
+	default:
+		return filter.ToExpression(column);
+	}
+}
+
+unique_ptr<MultiFileList> HMSMultiFileReader::DynamicFilterPushdown(
+    ClientContext &context, const MultiFileList &files, const MultiFileOptions &options, const vector<string> &names,
+    const vector<LogicalType> &types, const vector<column_t> &column_ids, TableFilterSet &filters) {
+	auto &schema = cache->Schema();
+	if (schema.names.empty() || filters.filters.empty() || !cache->DynamicPruning()) {
+		return nullptr;
+	}
+	// The filters as expressions over this scan's columns, the way DuckDB's own pushdown makes them. Static filters
+	// come along; those already selected the partitions while planning, so they narrow nothing down again.
+	ExtraOperatorInfo extra_info;
+	MultiFilePushdownInfo info(0, names, column_ids, extra_info);
+	auto partition_column_ids = PartitionColumnIds(info, schema.names);
+	vector<unique_ptr<Expression>> expressions;
+	for (auto &entry : filters.filters) {
+		auto local_index = entry.first;
+		if (local_index >= column_ids.size() || IsVirtualColumn(column_ids[local_index]) ||
+		    column_ids[local_index] >= types.size() || !partition_column_ids.count(local_index)) {
+			continue;
+		}
+		BoundColumnRefExpression column(types[column_ids[local_index]], ColumnBinding(0, local_index));
+		auto expression = TableFilterToExpression(*entry.second, column);
+		if (expression && ReferencesOnlyPartitionColumns(*expression, partition_column_ids, 0)) {
+			expressions.push_back(std::move(expression));
+		}
+	}
+	if (expressions.empty()) {
+		return nullptr;
+	}
+	try {
+		auto partition_files = dynamic_cast<const HMSPartitionFileList *>(&files);
+		if (!partition_files) {
+			// PARTITION_MODE 'path', or files under the table location pruned while planning
+			return PrunePathFiles(context, files, info, expressions);
+		}
+		unique_ptr<MultiFileList> result = partition_files->PushdownFilters(context, info, expressions, true);
+		auto &selected = result ? *result : files;
+		auto selected_partition_files = dynamic_cast<const HMSPartitionFileList *>(&selected);
+		if (selected_partition_files && selected_partition_files->ReadsTableLocation()) {
+			auto pruned = PrunePathFiles(context, selected, info, expressions);
+			if (pruned) {
+				return pruned;
+			}
+		}
+		return result;
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		// The scan selects its partitions the planned way instead, and reports the error if it hits it too
+		DUCKDB_LOG_WARNING(context, "hive_metastore: the join filters could not select the partitions of \"%s.%s\": %s",
+		                   schema.database, schema.table, error.RawMessage());
+		return nullptr;
+	}
+}
+
+unique_ptr<MultiFileList> HMSMultiFileReader::PrunePathFiles(ClientContext &context, const MultiFileList &files,
                                                              MultiFilePushdownInfo &info,
                                                              vector<unique_ptr<Expression>> &filters) const {
 	// Drop the files whose key=value path values cannot satisfy the filters, before they are opened. A value the path

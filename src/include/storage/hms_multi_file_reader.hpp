@@ -22,7 +22,7 @@ static constexpr const char *HMS_PARTITION_VALUES_KEY = "hms_partition_values";
 struct HMSScanDiagnostics {
 	void Record(const HMSPartitionSelection &selection, idx_t selected);
 
-	mutex lock;
+	mutable mutex lock;
 	bool recorded = false;
 	HMSPartitionMethod method = HMSPartitionMethod::FULL;
 	idx_t selected = 0;
@@ -33,6 +33,8 @@ struct HMSScanDiagnostics {
 //! What EXPLAIN shows for the scan of a partitioned table: how its partitions were selected, if they were while
 //! planning. Never contacts the metastore.
 InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &input);
+//! What EXPLAIN ANALYZE shows once the scan ran: how its partitions were selected in the end, by join filters too
+InsertionOrderPreservingMap<string> HMSScanDynamicToString(TableFunctionDynamicToStringInput &input);
 
 //! Carries what the multi-file reader DuckDB creates while binding the scan needs from the table entry: the table's
 //! partition metadata cache, and the entry's columns, which the scan must produce in exactly that order
@@ -51,6 +53,8 @@ struct HMSScanFunctionInfo : public TableFunctionInfo {
 	//! Whether the scan binds to these columns and matches files to them by name (files that name their columns),
 	//! rather than binding the format's own way and getting the partition columns appended (CSV)
 	bool bind_to_table_columns;
+	//! The format's own EXPLAIN ANALYZE details, which HMSScanDynamicToString adds to
+	table_function_dynamic_to_string_t base_dynamic_to_string = nullptr;
 };
 
 //! The files of one partitioned table, one partition at a time. Each partition is globbed at its own location, so
@@ -94,6 +98,13 @@ public:
 
 	//! Whether the table turned out to have no partition registered, so the files under its location are read
 	bool ReadsTableLocation() const;
+	//! Selects the partitions the filters leave (if not done yet) and drops those whose values cannot satisfy them,
+	//! as a new list; null when nothing changes. `dynamic`: the filters are those a join pushed when the scan
+	//! started, recorded on the new list rather than on the scan's EXPLAIN details.
+	unique_ptr<HMSPartitionFileList> PushdownFilters(ClientContext &context, MultiFilePushdownInfo &info,
+	                                                 vector<unique_ptr<Expression>> &filters, bool dynamic) const;
+	//! How join filters selected this list's partitions, if they did
+	const HMSScanDiagnostics *DynamicSelection() const;
 
 protected:
 	bool ExpandNextPath() const override;
@@ -131,6 +142,8 @@ private:
 	mutable State state;
 	//! The row estimate made before the partitions were selected
 	mutable optional_idx unresolved_estimate;
+	//! How join filters selected the partitions, for a list made when the scan started
+	mutable HMSScanDiagnostics dynamic_selection;
 	mutable shared_ptr<const HMSPartitionPlan> plan;
 	//! The partitions still to scan, as indexes into plan->partitions
 	mutable vector<idx_t> partition_indexes;
@@ -174,6 +187,13 @@ public:
 	unique_ptr<MultiFileList> ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
 	                                                const MultiFileOptions &options, MultiFilePushdownInfo &info,
 	                                                vector<unique_ptr<Expression>> &filters) override;
+	//! When the scan starts: selects the partitions again with the filters a join pushed (hash join keys as an IN
+	//! list or a range), so only the partitions the join can match are listed and read
+	unique_ptr<MultiFileList> DynamicFilterPushdown(ClientContext &context, const MultiFileList &files,
+	                                                const MultiFileOptions &options, const vector<string> &names,
+	                                                const vector<LogicalType> &types,
+	                                                const vector<column_t> &column_ids,
+	                                                TableFilterSet &filters) override;
 	void FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
@@ -186,7 +206,8 @@ private:
 	//! is not present: the column is then read from the file itself.
 	vector<Value> ValuesForFile(ClientContext &context, const BaseFileReader &reader, vector<bool> &present) const;
 	//! Drops the files whose key=value path values cannot satisfy the filters (files under the table location)
-	unique_ptr<MultiFileList> PrunePathFiles(ClientContext &context, MultiFileList &files, MultiFilePushdownInfo &info,
+	unique_ptr<MultiFileList> PrunePathFiles(ClientContext &context, const MultiFileList &files,
+	                                         MultiFilePushdownInfo &info,
 	                                         vector<unique_ptr<Expression>> &filters) const;
 
 	shared_ptr<HMSPartitionCache> cache;

@@ -40,7 +40,8 @@ public:
 	                    string catalog_name = "hive_metastore",
 	                    idx_t metadata_cache_ttl_seconds = DEFAULT_METADATA_CACHE_TTL_SECONDS,
 	                    HMSPartitionMode partition_mode = HMSPartitionMode::AUTO,
-	                    HMSPartitionFilterPushdown partition_filter_pushdown = HMSPartitionFilterPushdown::EXACT);
+	                    HMSPartitionFilterPushdown partition_filter_pushdown = HMSPartitionFilterPushdown::EXACT,
+	                    bool dynamic_partition_pruning = true);
 	~HMSCatalog() override;
 
 	string internal_name;
@@ -93,6 +94,10 @@ public:
 	HMSPartitionFilterPushdown GetPartitionFilterPushdown() const {
 		return partition_filter_pushdown;
 	}
+	//! Whether a scan's partitions are selected again with the filters a join pushes when the scan starts
+	bool GetDynamicPartitionPruning() const {
+		return dynamic_partition_pruning;
+	}
 	//! Incremented by ClearCache; catalog sets compare it to invalidate what they cached earlier
 	idx_t GetCacheGeneration() const {
 		return cache_generation.load();
@@ -111,6 +116,7 @@ private:
 	std::chrono::steady_clock::duration metadata_cache_ttl;
 	HMSPartitionMode partition_mode;
 	HMSPartitionFilterPushdown partition_filter_pushdown;
+	bool dynamic_partition_pruning;
 	atomic<idx_t> cache_generation;
 
 	mutex suggestion_lock;

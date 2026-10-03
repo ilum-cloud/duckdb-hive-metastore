@@ -90,6 +90,7 @@ public:
 	}
 	HMSPartitionMode Mode() const;
 	HMSPartitionFilterPushdown FilterPushdown() const;
+	bool DynamicPruning() const;
 
 	//! Every partition, or PATH when the table has none registered (errors in PARTITION_MODE 'hms')
 	HMSPartitionSelection ResolveAll(ClientContext &context);

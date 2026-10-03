@@ -55,6 +55,10 @@ HMSPartitionFilterPushdown HMSPartitionCache::FilterPushdown() const {
 	return catalog.GetPartitionFilterPushdown();
 }
 
+bool HMSPartitionCache::DynamicPruning() const {
+	return catalog.GetDynamicPartitionPruning();
+}
+
 bool HMSPartitionCache::IsFresh(time_point loaded_at, idx_t loaded_generation, idx_t generation) const {
 	return loaded_generation == generation &&
 	       std::chrono::steady_clock::now() - loaded_at < catalog.GetMetadataCacheTTL();
