@@ -1,0 +1,75 @@
+# name: test/sql/cache/schema_point_lookup.test
+# description: Resolving a schema asks the metastore for that one database, never for the list of every database
+# group: [cache]
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.reviews;
+----
+150
+
+# One get_database call for sample_db. Listing every database is slow on a metastore with thousands of them, or one
+# that checks permissions per database, and a query only needs the one it names.
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get\_all\_databases%' ESCAPE '\'),
+       count(*) FILTER (WHERE message = 'hive_metastore rpc=get_database db=sample_db')
+FROM duckdb_logs;
+----
+0	1
+
+# Names still match regardless of case
+query I
+SELECT count(*) FROM hms.SAMPLE_DB.reviews;
+----
+150
+
+# A schema that does not exist fails as before, and is asked about once
+statement error
+SELECT * FROM hms.no_such_db.t;
+----
+schema "no_such_db" does not exist
+
+statement error
+SELECT * FROM hms.no_such_db.t;
+----
+schema "no_such_db" does not exist
+
+query II
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_database db=no_such_db'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get\_all\_databases%' ESCAPE '\')
+FROM duckdb_logs;
+----
+1	0
+
+# Listing the schemas still lists every database
+query I
+SELECT count(*) >= 2 FROM duckdb_schemas() WHERE database_name = 'hms';
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore rpc=get\_all\_databases%' ESCAPE '\';
+----
+1
+
+statement ok
+CALL disable_logging();
