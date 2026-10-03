@@ -86,24 +86,18 @@ The following table shows which SQL operations are supported for each table form
 - DATE/TIMESTAMP columns are stored in HMS as `date`/`timestamp` and round-trip
   correctly because `duckdb-avro` reads the corresponding Avro logical types.
 
-**Schema drift on Parquet (not supported):**
+**Schema drift on Parquet:**
 
-- Columns added directly to HMS metadata (e.g. `ALTER TABLE ADD COLUMNS` in
-  Hive/Spark, or direct mutation of `COLUMNS_V2`) are **not** visible to DuckDB
-  on Parquet-backed tables. The Parquet file schema is treated as authoritative
-  for the column list — `HMSTableEntry::DiscoverDynamicSchema` reads the schema
-  from the data files and overrides the HMS column list at catalog load time.
-- Affects pure metadata schema evolution flows where Hive/Spark adds a column
-  but the underlying Parquet files have not been rewritten yet. Old rows would
-  return `NULL` for the new column in a fully HMS-driven catalog — this
-  extension does not surface the column at all.
-- Workaround: rewrite the data files with the new column projected (e.g.
-  `INSERT OVERWRITE` from Spark) so the Parquet footer carries the new column.
-  Once present in the files, DuckDB sees it after its cached metadata for the
-  table expires (see [Metadata caching](#metadata-caching)) or after
-  `CALL hms_clear_cache()`.
-- Tracking: see the schema-drift issue on GitHub. The acceptance test
-  `test/sql/oss/schema_drift.test` is currently disabled.
+- The columns of a Parquet table are read from a data file (the first file of the first partition the metastore
+  returns, for a partitioned table), which keeps the types the files were written with.
+- Columns the metastore declares that this file lacks (added with `ALTER TABLE ADD COLUMNS` in Hive/Spark, or directly
+  in `COLUMNS_V2`, before any file holding them was written) are added after the file's columns, with the type the
+  metastore gives them. Files without such a column read `NULL` for it, files written since read their value.
+- For a Spark table whose metastore columns are Spark's placeholder (`col array<string>`), the declared columns come
+  from the Spark schema in the table properties.
+- A column only the metastore declares, of a type DuckDB cannot read (`uniontype`, ...), is left out with a warning
+  in the DuckDB log.
+- A column dropped from the metastore but still in the files stays visible, as the files are read.
 
 ### Write Operation Requirements
 

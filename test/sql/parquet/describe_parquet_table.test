@@ -16,6 +16,8 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
+# The columns come from the Parquet files, then drift_note, which only the metastore declares: the suite adds it with
+# test/sql/oss/post_seed_schema_drift.sh (the test-schema-drift Makefile target)
 query TTTTTT
 DESCRIBE TABLE hms.sample_db.customers;
 ----
@@ -51,6 +53,12 @@ NULL
 NULL
 signup_date
 DATE
+YES
+NULL
+NULL
+NULL
+drift_note
+VARCHAR
 YES
 NULL
 NULL
