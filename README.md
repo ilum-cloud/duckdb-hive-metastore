@@ -152,6 +152,7 @@ ATTACH 'thrift://<host>:<port>' AS <catalog_name> (<options>);
   - `DEFAULT_SCHEMA`: The database/schema name to use when queries don't specify one. Defaults to `default` if not provided.
   - `METADATA_CACHE_TTL`: How many seconds table and database metadata loaded from the metastore is reused before it is revalidated. Defaults to `5`; `0` revalidates in every transaction. See [Metadata caching](#metadata-caching).
   - `PARTITION_MODE`: How the files of a partitioned table are located: `auto` (default), `hms` or `path`. See [Partitioned tables](#partitioned-tables).
+  - `PARTITION_FILTER_PUSHDOWN`: Which filters on partition columns the metastore evaluates: `exact` (default), `all` or `off`. See [Filters the metastore evaluates](#filters-the-metastore-evaluates).
 
 **Example:**
 
@@ -168,8 +169,9 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
   partitions moved to another bucket or prefix.
 - **The partition column values come from the metastore**, not from the directory names, so they are correct
   regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
-- **Filters on partition columns still skip files.** A filter that cannot match a partition's values drops that
-  partition before its location is even listed.
+- **A filter on partition columns selects the partitions.** The metastore returns only the partitions that can
+  match, and only their locations are listed, never the table location. See
+  [Filters the metastore evaluates](#filters-the-metastore-evaluates).
 - **Only registered partitions are read.** Directories under the table location that no partition points at are
   skipped, and a file belongs to the partition at the deepest location containing it, so a partition nested inside
   another's location is not read twice.
@@ -182,8 +184,8 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
   is `NULL` for their rows.
 - **Partition columns come last, in the order the metastore declares them.** For a table partitioned by
   `(year, month, region)` the columns end with `year, month, region`, which is the order Hive and Spark report.
-- The partition list is fetched the first time a table is scanned, never while listing or resolving tables, and is
-  then reused for `METADATA_CACHE_TTL` seconds.
+- Partitions are fetched when a table is scanned, once the query's filters are known, never while listing or
+  resolving tables. What the metastore returns is reused for `METADATA_CACHE_TTL` seconds.
 
 `PARTITION_MODE` controls this:
 
@@ -201,7 +203,66 @@ ATTACH 'thrift://localhost:9083' AS my_hms (TYPE hive_metastore, PARTITION_MODE 
 ```
 
 CSV files do not name their columns, so a CSV table reads them by position, as Hive does; Parquet and Avro files are
-matched to the table's columns by name.
+matched to the table's columns by name. The files of a partitioned CSV table are never sniffed, as sniffing would read
+files before the filters select the partitions:
+
+- A Spark CSV table (`USING csv`) is read in the dialect its options record, with Spark's defaults: `sep` or
+  `delimiter`, `header`, `quote`, `escape`, `comment`, `nullValue`, `encoding`, `dateFormat` and `timestampFormat`
+  (when the pattern has a DuckDB equivalent). A quoted empty field reads as the empty string, as in Spark.
+- A Hive text table is read the way LazySimpleSerDe writes it: `field.delim`, no quoting, `skip.header.line.count`
+  lines skipped at the top of each file, and `serialization.null.format` (`\N` by default) or an empty field read as
+  `NULL`.
+
+#### Filters the metastore evaluates
+
+When a query filters on partition columns, the filter is translated into a metastore filter
+(`get_partitions_by_filter`) and the metastore returns the matching partitions. Only forms a Hive 3.1 metastore
+evaluates the way DuckDB does are sent; the rest of the filter is left out, which can only widen the selection, and
+DuckDB still checks every partition's real values, so the rows are the same either way.
+
+| Partition key type | Sent by default (`exact`) | Sent with `all` too |
+|---|---|---|
+| `tinyint`, `smallint`, `int`, `bigint`, `date` | `=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`, `NOT IN` | |
+| `string` | `=`, `IN` | `<`, `<=`, `>`, `>=`, `<>`, `BETWEEN`, `NOT IN` |
+
+Comparisons are combined with `AND` and `OR`. A key of another type (`varchar(n)`, `decimal`, ...), a key named like a
+filter keyword (`date`), a string holding a quote, a slash or another character Hive escapes in partition names, and
+anything else (`LIKE`, functions, casts, `IS NULL`, `NOT`, prepared statement parameters) is not sent.
+
+String ranges are not sent by default because the metastore compares strings in its database, under the database's
+collation: on a Postgres metastore with an `en_US` collation, `'a' < 'B'`, so `s > 'B'` would drop the partition
+`s=a` that DuckDB matches. `all` sends them anyway, for a metastore whose database compares bytes (`C` collation).
+`off` never sends a filter.
+
+When nothing can be sent, or the metastore refuses the filter, the partition names are listed, the filter is evaluated
+on the values they hold, and only the matching partitions are fetched. Hive 3.1 refuses every filter on a `date` key
+when its database is Postgres (it binds the date as text), and can refuse one on an integral key there too. A refused
+key is left out of the filters for `METADATA_CACHE_TTL` seconds and the rest of the filter is sent again at once.
+
+`EXPLAIN` shows how the partitions were selected:
+
+```text
+HMS Partitions:         1 (hms_filter)
+HMS Partition Filter:   s = "a"
+```
+
+or, when the metastore could not select them:
+
+```text
+HMS Partitions:         5 (partition_names)
+HMS Partition Fallback: no filter on the partition columns can be evaluated by the metastore exactly
+```
+
+The debug log has one `hive_metastore partitions ... method=... selected=... filter="..."` line per scan.
+
+Limits:
+
+- Integral and date keys are compared as numbers and dates, which assumes the metastore stores their values the way
+  Hive and Spark write them (`7`, not `07`). Use `off` for a table where that is not so.
+- When a partition's location is a single file directly inside another partition's directory and the filter selects
+  only the outer partition, that file is read as part of the outer one.
+- The metastore returns the selected partitions in one response; a filter matching a very large number of them can
+  exceed the Thrift message size limit, and the partition names are used instead.
 
 ### Metadata caching
 

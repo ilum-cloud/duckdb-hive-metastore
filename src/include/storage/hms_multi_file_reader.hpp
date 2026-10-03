@@ -30,6 +30,10 @@ struct HMSScanDiagnostics {
 	string reason;
 };
 
+//! What EXPLAIN shows for the scan of a partitioned table: how its partitions were selected, if they were while
+//! planning. Never contacts the metastore.
+InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &input);
+
 //! Carries what the multi-file reader DuckDB creates while binding the scan needs from the table entry: the table's
 //! partition metadata cache, and the entry's columns, which the scan must produce in exactly that order
 struct HMSScanFunctionInfo : public TableFunctionInfo {

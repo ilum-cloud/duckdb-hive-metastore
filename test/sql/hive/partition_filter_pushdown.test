@@ -462,6 +462,17 @@ SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore rpc=get_part
 ----
 2
 
+# EXPLAIN tells how the partitions were selected
+query II
+EXPLAIN (FORMAT JSON) SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n BETWEEN 2 AND 4;
+----
+physical_plan	<REGEX>:.*"HMS Partitions": "3 \((cached_)?hms_filter\)",\s*"HMS Partition Filter": "n BETWEEN 2 AND 4".*
+
+query II
+EXPLAIN (FORMAT JSON) SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s > 'B';
+----
+physical_plan	<REGEX>:.*"HMS Partitions": "5 \(partition_names\)",\s*"HMS Partition Fallback": "no filter on the partition columns can be evaluated by the metastore exactly".*
+
 # A filter with a parameter is known only when the statement runs: the scan reads every partition, and the rows
 # are right for every value
 statement ok

@@ -350,6 +350,7 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(
 		    std::move(partition_cache), std::move(column_names), std::move(column_types), bind_to_table_columns);
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
+		scan_function.to_string = HMSScanToString;
 	}
 
 	// For CSV/Text tables, we must provide the schema to avoid type mismatch crashes

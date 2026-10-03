@@ -35,6 +35,35 @@ void HMSScanDiagnostics::Record(const HMSPartitionSelection &selection, idx_t se
 	reason = selection.reason;
 }
 
+InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &input) {
+	InsertionOrderPreservingMap<string> result;
+	result["Function"] = StringUtil::Upper(input.table_function.name);
+	auto &info = input.table_function.function_info->Cast<HMSScanFunctionInfo>();
+	if (info.cache->Mode() == HMSPartitionMode::PATH) {
+		return result;
+	}
+	auto &diagnostics = *info.diagnostics;
+	lock_guard<mutex> guard(diagnostics.lock);
+	if (!diagnostics.recorded) {
+		// No filter was about the partition columns alone: the scan selects every partition when it starts
+		result["HMS Partitions"] = "all, selected when the scan starts";
+		return result;
+	}
+	if (diagnostics.method == HMSPartitionMethod::PATH) {
+		result["HMS Partitions"] = "none registered, the files under the table location are read";
+	} else {
+		result["HMS Partitions"] =
+		    StringUtil::Format("%llu (%s)", diagnostics.selected, HMSPartitionMethodName(diagnostics.method));
+	}
+	if (!diagnostics.hms_filter.empty()) {
+		result["HMS Partition Filter"] = diagnostics.hms_filter;
+	}
+	if (!diagnostics.reason.empty()) {
+		result["HMS Partition Fallback"] = diagnostics.reason;
+	}
+	return result;
+}
+
 static void LogSelection(ClientContext &context, const HMSPartitionSchema &schema,
                          const HMSPartitionSelection &selection, idx_t selected) {
 	DUCKDB_LOG_DEBUG(context,
