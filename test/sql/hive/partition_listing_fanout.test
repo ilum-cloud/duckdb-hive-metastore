@@ -1,0 +1,90 @@
+# name: test/sql/hive/partition_listing_fanout.test
+# description: Once a filter has selected the partitions, each of them is listed and the table location never is
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_pushdown keeps partition p<id> at duck_fixture_pushdown/p<id>, with n = id for ids 1 to 4, 6 and 7.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+loop i 1 8
+
+statement ok
+COPY (SELECT ${i} AS id) TO 's3://test-bucket/duck_fixture_pushdown/p${i}/data.parquet';
+
+endloop
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+# Resolve the table first, so only the scans below are counted
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_pushdown;
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Most of the table is selected, still each partition is listed on its own
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n BETWEEN 2 AND 7 ORDER BY id;
+----
+2
+3
+4
+6
+7
+
+query II
+SELECT count(*) FILTER (WHERE regexp_matches(url_decode(request.url), 'prefix=duck_fixture_pushdown/p[234567]/')),
+       count(*) FILTER (WHERE NOT regexp_matches(url_decode(request.url), 'prefix=duck_fixture_pushdown/p[234567]/'))
+FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+5	0
+
+# The same with the partitions selected on their names
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s > 'a' ORDER BY id;
+----
+3
+5
+6
+7
+
+query II
+SELECT count(*) FILTER (WHERE regexp_matches(url_decode(request.url), 'prefix=duck_fixture_pushdown/p[3567]/')),
+       count(*) FILTER (WHERE NOT regexp_matches(url_decode(request.url), 'prefix=duck_fixture_pushdown/p[3567]/'))
+FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+4	0
+
+# Without a filter every partition is read, and one listing of the table location is cheaper
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_pushdown;
+----
+7
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%list-type=2%';
+----
+1
+
+statement ok
+CALL disable_logging();

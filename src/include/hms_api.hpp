@@ -62,7 +62,6 @@ public:
 	                                     const string &endpoint);
 	static HMSAPITable FromThrift(const Apache::Hadoop::Hive::Table &table);
 
-	//! Names of all partitions of a table; empty if it has none registered
 	//! Names of the partitions of a table, at most `max_parts` (-1: all); empty if it has none registered
 	static vector<string> GetPartitionNames(ClientContext &ctx, const string &schema, const string &table,
 	                                        const string &endpoint, int16_t max_parts = -1);
