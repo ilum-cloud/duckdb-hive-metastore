@@ -154,19 +154,15 @@ bool HMSPartitionFileList::BelongsTo(const string &path, idx_t partition_index) 
 vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index) const {
 	auto &partition = plan->partitions[partition_index];
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto list = [&](const string &pattern) {
-		auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
-		// A partition nested inside this one's location keeps its own files
-		files.erase(std::remove_if(files.begin(), files.end(),
-		                           [&](const OpenFileInfo &file) { return !BelongsTo(file.path, partition_index); }),
-		            files.end());
-		return files;
-	};
-	auto files = list(partition.scan_location);
-	if (files.empty() && !partition.fallback_scan_location.empty()) {
-		// Hive writes data files without an extension (`000000_0`), so the format's pattern matches nothing
-		files = list(partition.fallback_scan_location);
-	}
+	// One listing of everything under the location; the format's pattern picks the data files from it, else Hive's
+	// pattern for the files it writes without an extension (`000000_0`). Globbing each pattern would list twice.
+	auto pattern = partition.fallback_scan_location.empty() ? partition.scan_location : partition.location + "/**";
+	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
+	// A partition nested inside this one's location keeps its own files
+	files.erase(std::remove_if(files.begin(), files.end(),
+	                           [&](const OpenFileInfo &file) { return !BelongsTo(file.path, partition_index); }),
+	            files.end());
+	files = SelectDataFiles(partition, std::move(files));
 	if (files.empty() && fs.FileExists(partition.location)) {
 		// A partition location that points at a single file rather than a directory
 		files.emplace_back(partition.location);
