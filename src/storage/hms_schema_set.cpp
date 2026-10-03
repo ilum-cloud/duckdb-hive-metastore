@@ -17,6 +17,31 @@ static bool IsInternalTable(const string &catalog, const string &schema) {
 	return false;
 }
 
+unique_ptr<HMSSchemaEntry> HMSSchemaSet::MakeSchemaEntry(const string &name) {
+	CreateSchemaInfo info;
+	info.schema = name;
+	info.internal = IsInternalTable(GetHMSCatalog().catalog_name, name);
+	auto schema_entry = make_uniq<HMSSchemaEntry>(catalog, info);
+	HMSAPISchema schema;
+	schema.schema_name = name;
+	schema_entry->schema_data = make_uniq<HMSAPISchema>(schema);
+	return schema_entry;
+}
+
+HMSLoadResult HMSSchemaSet::LoadEntry(ClientContext &context, const string &name, optional_ptr<CatalogEntry> cached) {
+	// One get_database call. Resolving a schema used to list every database, which a metastore with thousands of them
+	// (or one that checks permissions per database) answers slowly, while a query only needs the one it names.
+	auto schema = HMSAPI::GetSchema(context, name, GetHMSCatalog().endpoint);
+	if (!schema) {
+		return HMSLoadResult::Missing();
+	}
+	if (cached) {
+		// A schema entry holds nothing but its name; reusing it also keeps its cached tables
+		return HMSLoadResult::KeepCached();
+	}
+	return HMSLoadResult::NewEntry(MakeSchemaEntry(schema->schema_name));
+}
+
 vector<string> HMSSchemaSet::ListEntryNames(ClientContext &context) {
 	vector<string> names;
 	for (const auto &schema : HMSAPI::GetSchemas(context, GetHMSCatalog().endpoint)) {
@@ -27,22 +52,14 @@ vector<string> HMSSchemaSet::ListEntryNames(ClientContext &context) {
 
 void HMSSchemaSet::LoadEntries(ClientContext &context, const vector<pair<string, optional_ptr<CatalogEntry>>> &requests,
                                const std::function<void(const string &name, HMSLoadResult result)> &on_loaded) {
-	auto &hms_catalog = GetHMSCatalog();
+	// The names come from the listing, so the databases exist: nothing more to ask the metastore
 	for (auto &request : requests) {
 		if (request.second) {
 			// A schema entry holds nothing but its name; reusing it also keeps its cached tables
 			on_loaded(request.first, HMSLoadResult::KeepCached());
 			continue;
 		}
-		CreateSchemaInfo info;
-		info.schema = request.first;
-		info.internal = IsInternalTable(hms_catalog.catalog_name, request.first);
-		auto schema_entry = make_uniq<HMSSchemaEntry>(catalog, info);
-
-		HMSAPISchema schema;
-		schema.schema_name = request.first;
-		schema_entry->schema_data = make_uniq<HMSAPISchema>(schema);
-		on_loaded(request.first, HMSLoadResult::NewEntry(std::move(schema_entry)));
+		on_loaded(request.first, HMSLoadResult::NewEntry(MakeSchemaEntry(request.first)));
 	}
 }
 

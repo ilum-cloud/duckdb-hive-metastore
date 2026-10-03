@@ -28,6 +28,9 @@ public:
 	vector<string> GetAllTables(const string &db_name);
 
 	Apache::Hadoop::Hive::Database GetDatabase(const string &db_name);
+	// Fetch one database. Returns false if it does not exist; other Thrift errors are re-thrown so callers can
+	// distinguish "missing" from "broken".
+	bool TryGetDatabase(const string &db_name, Apache::Hadoop::Hive::Database &result);
 	// Fetch one table. Returns false if the table does not exist; other Thrift errors are re-thrown so callers can
 	// distinguish "missing" from "broken".
 	bool TryGetTable(const string &db_name, const string &table_name, Apache::Hadoop::Hive::Table &result);

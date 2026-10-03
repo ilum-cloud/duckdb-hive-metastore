@@ -87,6 +87,19 @@ unique_ptr<HMSAPITable> HMSAPI::GetTable(ClientContext &ctx, const string &schem
 	return make_uniq<HMSAPITable>(FromThrift(thrift_table));
 }
 
+unique_ptr<HMSAPISchema> HMSAPI::GetSchema(ClientContext &ctx, const string &schema, const string &endpoint) {
+	DUCKDB_LOG_DEBUG(ctx, "hive_metastore rpc=get_database db=%s", schema);
+	auto client = GetClient(endpoint);
+	Apache::Hadoop::Hive::Database database;
+	if (!client->TryGetDatabase(schema, database)) {
+		return nullptr;
+	}
+	auto result = make_uniq<HMSAPISchema>();
+	result->schema_name = database.name;
+	result->description = database.description;
+	return result;
+}
+
 vector<HMSAPITable> HMSAPI::GetTables(ClientContext &ctx, const string &schema, const vector<string> &table_names,
                                       const string &endpoint) {
 	vector<HMSAPITable> result;
