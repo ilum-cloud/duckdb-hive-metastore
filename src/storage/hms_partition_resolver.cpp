@@ -16,8 +16,9 @@
 
 namespace duckdb {
 
-//! How many filters the metastore's answers are kept for, per table
+//! How many filters the metastore's answers are kept for, per table, and how many partitions they may hold together
 static constexpr idx_t FILTER_RESULTS_CACHED = 32;
+static constexpr idx_t FILTER_RESULT_PARTITIONS_CACHED = 100000;
 
 const char *HMSPartitionMethodName(HMSPartitionMethod method) {
 	switch (method) {
@@ -371,13 +372,21 @@ bool HMSPartitionCache::SelectByMetastoreFilter(ClientContext &context, idx_t ge
 	}
 	{
 		lock_guard<mutex> guard(lock);
+		auto partition_count = [](const FilterResult &cached) -> idx_t {
+			return cached.plan ? cached.plan->partitions.size() : 0;
+		};
 		auto position = std::find(filter_order.begin(), filter_order.end(), filter);
 		if (position != filter_order.end()) {
+			filter_result_partitions -= partition_count(filter_results[filter]);
 			filter_order.erase(position);
 		}
 		filter_order.push_back(filter);
 		filter_results[filter] = result;
-		while (filter_order.size() > FILTER_RESULTS_CACHED) {
+		filter_result_partitions += partition_count(result);
+		// The least recently used go first; an answer too large to keep on its own is not kept
+		while (!filter_order.empty() && (filter_order.size() > FILTER_RESULTS_CACHED ||
+		                                 filter_result_partitions > FILTER_RESULT_PARTITIONS_CACHED)) {
+			filter_result_partitions -= partition_count(filter_results[filter_order.front()]);
 			filter_results.erase(filter_order.front());
 			filter_order.erase(filter_order.begin());
 		}

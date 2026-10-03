@@ -148,6 +148,8 @@ private:
 	//! The metastore's answers to recent filters, most recently used last
 	unordered_map<string, FilterResult> filter_results;
 	vector<string> filter_order;
+	//! How many partitions the answers kept hold together
+	idx_t filter_result_partitions = 0;
 	//! The keys whose filters the metastore refused, left out of the filters sent until the TTL expires
 	vector<bool> refused_keys;
 	time_point refused_keys_loaded_at;
