@@ -9,18 +9,16 @@
 #pragma once
 
 #include "hms_lineage.hpp"
-#include "storage/hms_partition_plan.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-
-#include <chrono>
 
 namespace duckdb {
 
 // Forward declarations to avoid including Thrift-dependent headers
 struct HMSAPITable;
 struct HMSAPIColumnDefinition;
+class HMSPartitionCache;
 namespace hms {
 struct FormatDetectionResult;
 } // namespace hms
@@ -51,9 +49,9 @@ public:
 	//! them. Decided from the metastore metadata alone, so it never costs a request.
 	static bool InjectsPartitionColumns(const HMSAPITable &table, const hms::FormatDetectionResult &format);
 
-	//! How to locate this table's files and fill its partition columns. The partition list is fetched on the first
-	//! scan and reused for the catalog's metadata cache TTL. Never called while looking up or listing tables.
-	shared_ptr<const HMSPartitionPlan> GetPartitionPlan(ClientContext &context);
+	//! The partition metadata of this table, shared by its scans. Creating it costs no request: the partitions are
+	//! fetched when a scan needs them, never while looking up or listing tables.
+	shared_ptr<HMSPartitionCache> GetPartitionCache(ClientContext &context);
 
 	unique_ptr<HMSAPITable> table_data;
 	HMSSchemaSource schema_source = HMSSchemaSource::HMS_COLUMNS;
@@ -85,12 +83,8 @@ public:
 	HMSLineageInfo GetLineageInfo() const;
 
 private:
-	mutex partition_lock;
-	shared_ptr<const HMSPartitionPlan> partition_plan;
-	std::chrono::steady_clock::time_point partition_plan_loaded_at;
-	idx_t partition_plan_generation = 0;
-	//! Whether falling back to the table location for lack of registered partitions was already reported
-	bool warned_no_partitions = false;
+	mutex partition_cache_lock;
+	shared_ptr<HMSPartitionCache> partition_cache;
 };
 
 } // namespace duckdb
