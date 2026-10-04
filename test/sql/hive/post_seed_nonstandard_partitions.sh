@@ -30,6 +30,14 @@ set -euo pipefail
 #                            varchar(10) key (a type the metastore does not filter on).
 #   * duck_fixture_many_parts - 300 partitions (n = 1 to 300), enough for a filter selecting most of
 #                            them to list the table location once.
+#   * duck_fixture_hms_only_cols / duck_fixture_hms_only_flat - a partitioned and an unpartitioned
+#                            Parquet table declaring (id INT, extra STRING), plus a uniontype column u
+#                            added in the metastore database (Hive's Parquet serde refuses it in DDL).
+#                            The tests write files without extra, or with it, as after ALTER TABLE ADD
+#                            COLUMNS.
+#   * duck_fixture_spark_placeholder - columns as Spark stores a table Hive cannot describe: the
+#                            placeholder col array<string>, with the real schema (id, extra) in the
+#                            table properties.
 #
 # The data files are written by the tests themselves with COPY: the metastore container runs no
 # execution engine, so Hive can only do DDL here.
@@ -155,6 +163,25 @@ CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_many_parts (id INT)
 
 ALTER TABLE sample_db.duck_fixture_many_parts ADD IF NOT EXISTS
 $(for n in $(seq 1 300); do echo "  PARTITION (n=$n) LOCATION 's3a://test-bucket/duck_fixture_many_parts/p$n'"; done);
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_hms_only_cols (id INT, extra STRING)
+  PARTITIONED BY (batch STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_hms_only_cols';
+
+ALTER TABLE sample_db.duck_fixture_hms_only_cols ADD IF NOT EXISTS
+  PARTITION (batch='a') LOCATION 's3a://test-bucket/duck_fixture_hms_only_cols/a'
+  PARTITION (batch='b') LOCATION 's3a://test-bucket/duck_fixture_hms_only_cols/b';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_hms_only_flat (id INT, extra STRING)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_hms_only_flat';
+
+CREATE EXTERNAL TABLE IF NOT EXISTS sample_db.duck_fixture_spark_placeholder (col ARRAY<STRING>)
+  STORED AS PARQUET
+  LOCATION 's3a://test-bucket/duck_fixture_spark_placeholder'
+  TBLPROPERTIES ('spark.sql.sources.provider'='parquet',
+                 'spark.sql.sources.schema'='{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"extra\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}');
 "
 
 # Hive refuses to register __HIVE_DEFAULT_PARTITION__ through DDL ("reserved substring"), yet it
@@ -214,6 +241,14 @@ UPDATE "PARTITIONS" p
   FROM "TBLS" t
  WHERE t."TBL_ID" = p."TBL_ID"
    AND t."TBL_NAME" = 'duck_fixture_pushdown';
+
+-- duck_fixture_hms_only_cols / _flat: a column of a type DuckDB cannot read, declared in the metastore only
+INSERT INTO "COLUMNS_V2" ("CD_ID", "COLUMN_NAME", "TYPE_NAME", "INTEGER_IDX", "COMMENT")
+SELECT s."CD_ID", 'u', 'uniontype<int,string>', 2, NULL
+  FROM "TBLS" t
+  JOIN "SDS" s ON s."SD_ID" = t."SD_ID"
+ WHERE t."TBL_NAME" IN ('duck_fixture_hms_only_cols', 'duck_fixture_hms_only_flat')
+ON CONFLICT DO NOTHING;
 
 SELECT p."PART_NAME", v."INTEGER_IDX", v."PART_KEY_VAL", s."LOCATION"
   FROM "PARTITIONS" p

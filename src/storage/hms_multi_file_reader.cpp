@@ -4,6 +4,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -888,10 +889,42 @@ unique_ptr<MultiFileReader> HMSMultiFileReader::Copy() const {
 	return make_uniq<HMSMultiFileReader>(cache, diagnostics, column_names, column_types, bind_to_table_columns);
 }
 
+//! The files under a table location, read without the partition list: an unpartitioned table, or PARTITION_MODE
+//! 'path'. The scan opens no file while planning, so the rows are estimated from the table's statistics, else from
+//! the sizes of its first files: DuckDB would report 0 rows for a single file.
+class HMSTableLocationFileList : public GlobMultiFileList {
+public:
+	HMSTableLocationFileList(ClientContext &context, vector<string> paths, FileGlobInput glob_input,
+	                         shared_ptr<const HMSAPITable> table_p)
+	    : GlobMultiFileList(context, std::move(paths), std::move(glob_input)), table(std::move(table_p)) {
+	}
+
+	unique_ptr<NodeStatistics> GetCardinality(ClientContext &context_p) const override {
+		if (table) {
+			for (auto key : {"numRows", "spark.sql.statistics.numRows"}) {
+				auto entry = table->parameters.find(key);
+				int64_t rows;
+				if (entry != table->parameters.end() && TryCast::Operation(string_t(entry->second), rows) && rows > 0) {
+					return make_uniq<NodeStatistics>(NumericCast<idx_t>(rows));
+				}
+			}
+		}
+		return EstimateFromFiles(*this);
+	}
+
+private:
+	shared_ptr<const HMSAPITable> table;
+};
+
 shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,
                                                              const FileGlobInput &glob_input) {
-	if (cache->Mode() == HMSPartitionMode::PATH) {
-		return MultiFileReader::CreateFileList(context, paths, glob_input);
+	if (cache->Mode() == HMSPartitionMode::PATH || cache->Schema().names.empty()) {
+		auto files = make_shared_ptr<HMSTableLocationFileList>(context, paths, glob_input, cache->Schema().table_data);
+		if (files->GetExpandResult() == FileExpandResult::NO_FILES &&
+		    glob_input.behavior != FileGlobOptions::ALLOW_EMPTY) {
+			throw IOException("%s needs at least one file to read", function_name);
+		}
+		return std::move(files);
 	}
 	// The partitions are selected once the filters are known, so the metastore can select them
 	return make_shared_ptr<HMSPartitionFileList>(context, cache, diagnostics, glob_input);

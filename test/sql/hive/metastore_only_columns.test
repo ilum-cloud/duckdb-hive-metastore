@@ -1,0 +1,87 @@
+# name: test/sql/hive/metastore_only_columns.test
+# description: A Parquet table's columns are read from a data file, plus the columns only the metastore declares (added with ALTER TABLE ADD COLUMNS, no file written since), which read as NULL from files without them
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_hms_only_cols (partitioned by batch) and duck_fixture_hms_only_flat declare (id INT, extra STRING)
+# and a uniontype column u, a type DuckDB cannot read. duck_fixture_spark_placeholder has Spark's placeholder column
+# col array<string>, with (id, extra) in its Spark schema.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+# The first partition's file was written before extra existed, the second one's after
+statement ok
+COPY (SELECT 1::INT AS id) TO 's3://test-bucket/duck_fixture_hms_only_cols/a/data.parquet';
+
+statement ok
+COPY (SELECT 2::INT AS id, 'y' AS extra) TO 's3://test-bucket/duck_fixture_hms_only_cols/b/data.parquet';
+
+statement ok
+COPY (SELECT 3::INT AS id) TO 's3://test-bucket/duck_fixture_hms_only_flat/data.parquet';
+
+statement ok
+COPY (SELECT 4::INT AS id, 'x' AS extra) TO 's3://test-bucket/duck_fixture_hms_only_flat/new.parquet';
+
+statement ok
+COPY (SELECT 5::INT AS id) TO 's3://test-bucket/duck_fixture_spark_placeholder/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
+
+# extra comes from the metastore, after the file's columns and before the partition column; u is left out
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_hms_only_cols') ORDER BY cid;
+----
+id	INTEGER
+extra	VARCHAR
+batch	VARCHAR
+
+query ITT
+SELECT id, extra, batch FROM hms.sample_db.duck_fixture_hms_only_cols ORDER BY id;
+----
+1	NULL	a
+2	y	b
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_hms_only_cols WHERE extra IS NULL;
+----
+1
+
+# The same without partitions
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_hms_only_flat') ORDER BY cid;
+----
+id	INTEGER
+extra	VARCHAR
+
+query IT
+SELECT id, extra FROM hms.sample_db.duck_fixture_hms_only_flat ORDER BY id;
+----
+3	NULL
+4	x
+
+query II
+EXPLAIN SELECT * FROM hms.sample_db.duck_fixture_hms_only_flat;
+----
+physical_plan	<!REGEX>:.*~0 rows.*
+
+# Spark's placeholder column is not a column: the declared ones come from its schema
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_spark_placeholder') ORDER BY cid;
+----
+id	INTEGER
+extra	VARCHAR
+
+query IT
+SELECT id, extra FROM hms.sample_db.duck_fixture_spark_placeholder;
+----
+5	NULL

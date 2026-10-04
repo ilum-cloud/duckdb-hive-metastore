@@ -46,6 +46,64 @@ HMSTableEntry::HMSTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, Creat
 	}
 }
 
+//! Whether the metastore columns are Spark's stand-in for a schema Hive cannot describe (the real one is in the table
+//! properties)
+static bool IsSparkPlaceholderSchema(const HMSAPITable &table) {
+	return table.parameters.count(hms::spark_param::PROVIDER) && table.columns.size() == 1 &&
+	       StringUtil::CIEquals(table.columns[0].name, "col") &&
+	       StringUtil::CIEquals(table.columns[0].type, "array<string>");
+}
+
+//! Appends the columns the metastore declares that `columns` (read from a data file) lacks: those added with ALTER
+//! TABLE ADD COLUMNS before any file holding them was written. Partition keys are added separately. A column whose
+//! type DuckDB cannot read is left out with a warning rather than failing the table.
+static void AppendMetastoreOnlyColumns(ClientContext &context, const HMSAPITable &table, ColumnList &columns) {
+	vector<pair<string, string>> declared;
+	bool spark_types = false;
+	if (IsSparkPlaceholderSchema(table)) {
+		vector<HMSAPIColumnDefinition> spark_columns;
+		if (!HMSUtils::ParseSparkSchema(table.parameters, spark_columns)) {
+			return;
+		}
+		for (auto &col : spark_columns) {
+			declared.emplace_back(col.name, col.type);
+		}
+		spark_types = true;
+	} else {
+		for (auto &col : table.columns) {
+			declared.emplace_back(col.name, col.type);
+		}
+	}
+	case_insensitive_set_t partition_keys;
+	for (auto &partition_key : table.partition_keys) {
+		partition_keys.insert(partition_key.name);
+	}
+	for (auto &col : declared) {
+		if (partition_keys.count(col.first) || columns.ColumnExists(col.first)) {
+			continue;
+		}
+		LogicalType type;
+		try {
+			// The Spark schema already holds DuckDB type names
+			type = spark_types ? TransformStringToLogicalType(col.second, context)
+			                   : HMSUtils::TypeToLogicalType(context, col.second);
+		} catch (std::exception &ex) {
+			if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			DUCKDB_LOG_WARNING(context,
+			                   "hive_metastore: column \"%s\" of \"%s\" is in the metastore only and has a type DuckDB "
+			                   "cannot read (%s); it is left out",
+			                   col.first, table.name, col.second);
+			continue;
+		}
+		if (type.id() == LogicalTypeId::SQLNULL) {
+			continue;
+		}
+		columns.AddColumn(ColumnDefinition(col.first, std::move(type)));
+	}
+}
+
 unique_ptr<HMSTableEntry> HMSTableEntry::Build(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
                                                HMSAPITable table) {
 	auto table_name = table.name;
@@ -61,6 +119,10 @@ unique_ptr<HMSTableEntry> HMSTableEntry::Build(ClientContext &context, Catalog &
 			schema_source = HMSSchemaSource::FILES;
 			for (auto &col : discovered_columns) {
 				info.columns.AddColumn(std::move(col));
+			}
+			// A Parquet file holds the columns it was written with; the metastore may know of later ones
+			if (hms::FormatDetector::Detect(table).IsParquet()) {
+				AppendMetastoreOnlyColumns(context, table, info.columns);
 			}
 		} else {
 			// Try to parse Spark schema for other tables
@@ -375,8 +437,11 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 
 	// For partitioned tables, scan the partitions the metastore registered, at the locations it recorded, and fill
 	// the partition columns from the values it holds. DuckDB's own hive partitioning is not used: it can only read
-	// values out of key=value directory names and rejects any other layout.
-	if (InjectsPartitionColumns(*table_data, format_result)) {
+	// values out of key=value directory names and rejects any other layout. An unpartitioned Parquet table goes
+	// through the same reader, to match its files to the table's columns by name: files written before a column was
+	// added, or with the columns in another order, read like the others.
+	auto partitioned = InjectsPartitionColumns(*table_data, format_result);
+	if (partitioned || format_result.IsParquet()) {
 		// The partitions are not fetched here: the scan selects them once the filters are known
 		auto partition_cache = GetPartitionCache(context);
 		// The scan must produce exactly this entry's columns: the catalog maps them to the scan by position
@@ -393,11 +458,13 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		scan_function.function_info = make_shared_ptr<HMSScanFunctionInfo>(
 		    std::move(partition_cache), std::move(column_names), std::move(column_types), bind_to_table_columns);
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
-		scan_function.to_string = HMSScanToString;
-		// EXPLAIN ANALYZE adds what the scan finally read, the partitions join filters selected among them
-		scan_function.function_info->Cast<HMSScanFunctionInfo>().base_dynamic_to_string =
-		    scan_function.dynamic_to_string;
-		scan_function.dynamic_to_string = HMSScanDynamicToString;
+		if (partitioned) {
+			scan_function.to_string = HMSScanToString;
+			// EXPLAIN ANALYZE adds what the scan finally read, the partitions join filters selected among them
+			scan_function.function_info->Cast<HMSScanFunctionInfo>().base_dynamic_to_string =
+			    scan_function.dynamic_to_string;
+			scan_function.dynamic_to_string = HMSScanDynamicToString;
+		}
 	}
 
 	// For CSV/Text tables, we must provide the schema to avoid type mismatch crashes
