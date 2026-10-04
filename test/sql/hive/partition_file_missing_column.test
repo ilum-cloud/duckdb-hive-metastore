@@ -3,8 +3,9 @@
 # group: [hive]
 
 # Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
-# In duck_fixture_schema_mix the first file under the table location (a_dir) belongs to the last partition (batch c),
-# so the file the table's columns are read from is not the first file of the first partition.
+# In duck_fixture_schema_mix the partition directories sort in the opposite order to the partitions: batch a lives in
+# z_dir, batch c in a_dir. The table's columns are read from the first partition the metastore returns (batch a), so
+# from z_dir, not from the first file under the table location (a_dir).
 
 require hive_metastore
 
@@ -19,11 +20,11 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECR
 
 # Written after the column was added. The table's columns come from this file.
 statement ok
-COPY (SELECT 3 AS id, 300 AS amount, 'new' AS note) TO 's3://test-bucket/duck_fixture_schema_mix/a_dir/data.parquet';
+COPY (SELECT 1 AS id, 100 AS amount, 'new' AS note) TO 's3://test-bucket/duck_fixture_schema_mix/z_dir/data.parquet';
 
 # Written before
 statement ok
-COPY (SELECT 1 AS id, 100 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/z_dir/data.parquet';
+COPY (SELECT 3 AS id, 300 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/a_dir/data.parquet';
 
 statement ok
 COPY (SELECT 2 AS id, 200 AS amount) TO 's3://test-bucket/duck_fixture_schema_mix/y_dir/data.parquet';
@@ -42,14 +43,14 @@ batch	VARCHAR
 query IITT
 SELECT id, amount, note, batch FROM hms.sample_db.duck_fixture_schema_mix ORDER BY id;
 ----
-1	100	NULL	a
+1	100	new	a
 2	200	NULL	b
-3	300	new	c
+3	300	NULL	c
 
 query I
 SELECT id FROM hms.sample_db.duck_fixture_schema_mix WHERE note = 'new';
 ----
-3
+1
 
 query I
 SELECT count(*) FROM hms.sample_db.duck_fixture_schema_mix WHERE note IS NULL;

@@ -1,0 +1,499 @@
+# name: test/sql/hive/partition_filter_pushdown.test
+# description: The metastore selects the partitions a filter needs, for the filters it evaluates as DuckDB does; the rest are evaluated on the partition names, and the rows are the same either way
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# duck_fixture_pushdown is partitioned by (s STRING, n INT, d DATE), one row per partition:
+#   id 1: s=a n=1 d=2024-01-01      id 4: s=NULL n=4 d=2024-01-04     id 7: s=x/y n=7 d=2024-01-07
+#   id 2: s=B n=2 d=2024-01-02      id 5: s=c n=NULL d=2024-01-05
+#   id 3: s=b n=3 d=2024-01-03      id 6: s=d n=6 d=NULL
+# duck_fixture_awkward_keys is partitioned by (`date` STRING, v VARCHAR(10)), which no metastore filter can name.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+loop i 1 8
+
+statement ok
+COPY (SELECT ${i} AS id) TO 's3://test-bucket/duck_fixture_pushdown/p${i}/data.parquet';
+
+endloop
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_fixture_awkward_keys/k1/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO 's3://test-bucket/duck_fixture_awkward_keys/k2/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_all (TYPE hive_metastore, METADATA_CACHE_TTL 3600, PARTITION_FILTER_PUSHDOWN 'all');
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms_off (TYPE hive_metastore, METADATA_CACHE_TTL 3600, PARTITION_FILTER_PUSHDOWN 'off');
+
+statement error
+ATTACH 'thrift://localhost:9083' AS hms_bad (TYPE hive_metastore, PARTITION_FILTER_PUSHDOWN 'some');
+----
+PARTITION_FILTER_PUSHDOWN must be one of 'exact', 'all', 'off', got: some
+
+# Every shape gives the rows the filter accepts, whichever way the partitions are selected
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a';
+----
+1
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s IN ('a', 'B') ORDER BY id;
+----
+1
+2
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'x/y';
+----
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'it''s';
+----
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s IS NULL;
+----
+4
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s > 'B' ORDER BY id;
+----
+1
+3
+5
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s BETWEEN 'B' AND 'c' ORDER BY id;
+----
+1
+2
+3
+5
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s <> 'a' ORDER BY id;
+----
+2
+3
+5
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE NOT (s = 'a') ORDER BY id;
+----
+2
+3
+5
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s NOT IN ('a', 'c') ORDER BY id;
+----
+2
+3
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n > 3 ORDER BY id;
+----
+4
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE 3 < n ORDER BY id;
+----
+4
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n BETWEEN 2 AND 4 ORDER BY id;
+----
+2
+3
+4
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n > 1 AND n < 4 ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n NOT IN (1, 2) ORDER BY id;
+----
+3
+4
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n <> 1 ORDER BY id;
+----
+2
+3
+4
+6
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n IS NULL;
+----
+5
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d >= DATE '2024-01-03' ORDER BY id;
+----
+3
+4
+5
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d = '2024-01-02';
+----
+2
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d IN (DATE '2024-01-01', DATE '2024-01-07') ORDER BY id;
+----
+1
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d IS NULL;
+----
+6
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n > 1 AND d < DATE '2024-01-05' ORDER BY id;
+----
+2
+3
+4
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a' OR n = 3 ORDER BY id;
+----
+1
+3
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a' OR id = 3 ORDER BY id;
+----
+1
+3
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a' OR d = DATE '2024-01-02' ORDER BY id;
+----
+1
+2
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_awkward_keys WHERE "date" = 'x';
+----
+1
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_awkward_keys WHERE v = '2';
+----
+2
+
+# The same rows when no filter is sent to the metastore
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n > 1 AND d < DATE '2024-01-05' OR s IN ('a', 'c')
+    EXCEPT
+    SELECT id FROM hms_off.sample_db.duck_fixture_pushdown WHERE n > 1 AND d < DATE '2024-01-05' OR s IN ('a', 'c'));
+----
+0
+
+query I
+SELECT list(id ORDER BY id) FROM hms_off.sample_db.duck_fixture_pushdown WHERE n > 1 AND d < DATE '2024-01-05' OR s IN ('a', 'c');
+----
+[1, 2, 3, 4, 5]
+
+# How the partitions are selected
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+# An equality on a string key: one request, which the metastore answers with the partition. The table is resolved
+# first, so only the scan is counted.
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_pushdown;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a' AND id = 1;
+----
+1
+
+query III
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=s = "a"'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partition%' AND message NOT LIKE '%get_partitions_by_filter%'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=hms_filter selected=1 %')
+FROM duckdb_logs;
+----
+1	0	1
+
+# The answer is reused until the TTL expires
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'a';
+----
+1
+
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=%'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=cached_hms_filter %')
+FROM duckdb_logs;
+----
+0	1
+
+# Integral keys compare by value, ranges and OR included (DuckDB writes a BETWEEN under an OR as two comparisons)
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n BETWEEN 2 AND 4 OR s = 'a' ORDER BY id;
+----
+1
+2
+3
+4
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=((n >= 2 AND n <= 4) OR s = "a")';
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n NOT IN (1, 2) ORDER BY id;
+----
+3
+4
+6
+7
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=(n) NOT IN (1, 2)';
+----
+1
+
+# A range on a string key is not sent by default: the metastore database compares strings under its own collation
+# (Postgres here: en_US, where 'a' sorts before 'B'). The partition names are listed and evaluated instead.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s > 'B' ORDER BY id;
+----
+1
+3
+5
+6
+7
+
+query III
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %'),
+       count(*) FILTER (WHERE message = 'hive_metastore rpc=get_partition_names db=sample_db table=duck_fixture_pushdown'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=partition_names selected=5 %')
+FROM duckdb_logs;
+----
+0	1	1
+
+# PARTITION_FILTER_PUSHDOWN 'all' sends it, trusting the collation
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT id FROM hms_all.sample_db.duck_fixture_pushdown WHERE s > 'B';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message = 'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=s > "B"';
+----
+1
+
+# 'off' never sends a filter
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms_off.sample_db.duck_fixture_pushdown WHERE s = 'a';
+----
+1
+
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=partition_names % reason="PARTITION_FILTER_PUSHDOWN is ''off''"')
+FROM duckdb_logs;
+----
+0	1
+
+# Values the filter grammar cannot write, and keys it cannot name, go by the partition names without a request
+# the metastore would refuse
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s = 'x/y';
+----
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s IN ('it''s', 'a') ORDER BY id;
+----
+1
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_awkward_keys WHERE "date" = 'y' AND v = '2';
+----
+2
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %';
+----
+0
+
+# Nothing matches: no file is listed. The table is resolved first, so only the scan is counted.
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_pushdown;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hms.sample_db.duck_fixture_pushdown WHERE n = 5;
+----
+0
+
+query III
+SELECT count(*) FILTER (WHERE message = 'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=n = 5'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partition_names % max_parts=1'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=hms_filter selected=0 %')
+FROM duckdb_logs;
+----
+1	1	1
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%duck_fixture_pushdown%';
+----
+0
+
+# Hive 3.1 filters a date key in its direct SQL only, which fails on Postgres (the date is bound as text), and the
+# test metastore keeps its data in Postgres. The date key is then left out until the TTL expires: the next filter
+# that has one sends the rest of the filter, without being refused again.
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d >= DATE '2024-01-03' ORDER BY id;
+----
+3
+4
+5
+7
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE d = DATE '2024-01-02' AND s = 'B';
+----
+2
+
+query I
+SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n > 1 AND d < DATE '2024-01-04' ORDER BY id;
+----
+2
+3
+
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %' AND message LIKE '%filter=%d %')
+FROM duckdb_logs;
+----
+3	1
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore rpc=get_partitions_by_filter %' AND message IN (
+    'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=s = "B"',
+    'hive_metastore rpc=get_partitions_by_filter db=sample_db table=duck_fixture_pushdown filter=n > 1');
+----
+2
+
+# EXPLAIN tells how the partitions were selected
+query II
+EXPLAIN (FORMAT JSON) SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n BETWEEN 2 AND 4;
+----
+physical_plan	<REGEX>:.*"HMS Partitions": "3 \((cached_)?hms_filter\)",\s*"HMS Partition Filter": "n BETWEEN 2 AND 4".*
+
+query II
+EXPLAIN (FORMAT JSON) SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE s > 'B';
+----
+physical_plan	<REGEX>:.*"HMS Partitions": "5 \(partition_names\)",\s*"HMS Partition Fallback": "no filter on the partition columns can be evaluated by the metastore exactly".*
+
+# A filter with a parameter is known only when the statement runs: the scan reads every partition, and the rows
+# are right for every value
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+PREPARE by_n AS SELECT id FROM hms.sample_db.duck_fixture_pushdown WHERE n = $1;
+
+query I
+EXECUTE by_n(2);
+----
+2
+
+query I
+EXECUTE by_n(6);
+----
+6
+
+statement ok
+CALL disable_logging();

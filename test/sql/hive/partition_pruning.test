@@ -34,6 +34,10 @@ COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-buc
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);
 
+# Resolve the table first, so only the scans below are counted
+statement ok
+DESCRIBE hms.sample_db.duck_fixture_nonstd;
+
 statement ok
 CALL enable_logging(level='debug', storage='memory');
 

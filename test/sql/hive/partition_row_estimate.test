@@ -33,10 +33,10 @@ statement ok
 COPY (SELECT * FROM (VALUES (7, 70)) t(review_id, product_id)) TO 's3://test-bucket/duck_fixture_nonstd/hivefile/2026/000000_0' (FORMAT parquet);
 
 statement ok
-COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/data.parquet';
+COPY (SELECT 1::INTEGER AS id, 'x' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/a/000000_0' (FORMAT parquet);
 
 statement ok
-COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/data.parquet';
+COPY (SELECT 2::INTEGER AS id, 'y' AS label) TO 's3://test-bucket/duck_fixture_hms_types_data/b/000000_0' (FORMAT parquet);
 
 statement ok
 ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore);

@@ -1,0 +1,67 @@
+# name: test/sql/hive/partition_filter_pushdown_nested.test
+# description: When the metastore selects a partition whose directory holds the location of a partition it left out, the files of that one are still not read for the selected one
+# group: [hive]
+
+# Requires test/sql/hive/post_seed_nonstandard_partitions.sh (the test-fixture-nonstd-partitions Makefile target).
+# In duck_fixture_nested the partition 'inner' lives inside the location of the partition 'outer'.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+COPY (SELECT 1 AS id) TO 's3://test-bucket/duck_fixture_nested/outer/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO 's3://test-bucket/duck_fixture_nested/outer/inner/data.parquet';
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+# The metastore returns 'outer' alone. Its directory has a file below it, so the complete partition list is fetched
+# to learn that the file belongs to 'inner'.
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested WHERE part = 'outer';
+----
+1	outer
+
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=hms_filter selected=1 %'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % fetched the complete partition list: partition "part=outer" %')
+FROM duckdb_logs;
+----
+1	1
+
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested WHERE part = 'inner';
+----
+2	inner
+
+# Once the complete list is known, it is pruned without asking the metastore
+statement ok
+CALL truncate_duckdb_logs();
+
+query IT
+SELECT id, part FROM hms.sample_db.duck_fixture_nested WHERE part = 'outer';
+----
+1	outer
+
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'hive_metastore rpc=%'),
+       count(*) FILTER (WHERE message LIKE 'hive_metastore partitions % method=cached_plan %')
+FROM duckdb_logs;
+----
+0	1
+
+statement ok
+CALL disable_logging();

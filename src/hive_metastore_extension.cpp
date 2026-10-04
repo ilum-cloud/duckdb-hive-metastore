@@ -17,6 +17,7 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 	string warehouse_location;
 	idx_t metadata_cache_ttl_seconds = HMSCatalog::DEFAULT_METADATA_CACHE_TTL_SECONDS;
 	auto partition_mode = HMSPartitionMode::AUTO;
+	auto partition_filter_pushdown = HMSPartitionFilterPushdown::EXACT;
 	for (auto &entry : info.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "type" || lower_name == "read_only") {
@@ -42,6 +43,18 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 			} else {
 				throw BinderException("PARTITION_MODE must be one of 'auto', 'hms', 'path', got: %s", mode);
 			}
+		} else if (lower_name == "partition_filter_pushdown") {
+			auto pushdown = StringUtil::Lower(entry.second.ToString());
+			if (pushdown == "exact") {
+				partition_filter_pushdown = HMSPartitionFilterPushdown::EXACT;
+			} else if (pushdown == "all") {
+				partition_filter_pushdown = HMSPartitionFilterPushdown::ALL;
+			} else if (pushdown == "off") {
+				partition_filter_pushdown = HMSPartitionFilterPushdown::OFF;
+			} else {
+				throw BinderException("PARTITION_FILTER_PUSHDOWN must be one of 'exact', 'all', 'off', got: %s",
+				                      pushdown);
+			}
 		} else {
 			throw BinderException("Unrecognized option for HMS attach: %s", entry.first);
 		}
@@ -53,7 +66,7 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 
 	string catalog_name = "hive_metastore";
 	return make_uniq<HMSCatalog>(db, info.path, attach_options, info.path, default_schema, warehouse_location,
-	                             catalog_name, metadata_cache_ttl_seconds, partition_mode);
+	                             catalog_name, metadata_cache_ttl_seconds, partition_mode, partition_filter_pushdown);
 }
 
 static unique_ptr<TransactionManager> CreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

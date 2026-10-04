@@ -15,14 +15,6 @@
 
 namespace duckdb {
 
-//! Where the values of the partition columns come from
-enum class HMSPartitionSource : uint8_t {
-	//! The partitions registered in the metastore: values and location come from the partition record
-	HMS,
-	//! The file paths: values are parsed from their key=value segments, as DuckDB does natively
-	PATH
-};
-
 //! One partition to scan
 struct HMSScanPartition {
 	//! Display name ("k=v/k=v"), for warnings and errors
@@ -41,27 +33,26 @@ struct HMSScanPartition {
 	optional_idx file_count;
 };
 
-//! How a scan of a partitioned table locates its files and fills its partition columns. Built once per table entry
-//! and reused until the catalog's metadata cache TTL expires.
+//! Partitions of one table to scan, with what listing them takes. Built from what the metastore returned, either
+//! every partition of the table or those a filter selected, and reused until the metadata cache TTL expires.
 struct HMSPartitionPlan {
-	HMSPartitionSource source = HMSPartitionSource::PATH;
-	//! Partition column names, in the order the metastore declares them
-	vector<string> names;
-	//! Partition column types, in the same order
-	vector<LogicalType> types;
-	//! The partitions to scan; only set when source is HMS
+	//! The partitions, sorted by name
 	vector<HMSScanPartition> partitions;
+	//! Whether these are all the partitions the table has, rather than those a filter selected
+	bool complete = false;
 	//! Set when a partition location needs the S3 endpoint configured (an http:// location)
 	bool needs_s3_config = false;
 	string s3_endpoint;
 
 	//! The table location, normalized like the partition locations and without a trailing slash
 	string table_location;
-	//! How many partitions live under the table location, and how many files they hold if the metastore knows it
+	//! How many partitions live under the table location, and how many files they hold if the metastore knows it.
+	//! Only meaningful for a complete plan.
 	idx_t partitions_under_table_location = 0;
 	optional_idx files_under_table_location;
 	//! The partitions at each location. A file belongs to the partitions at the deepest location containing it, so
-	//! the files of a partition nested inside another's location are not read for the outer one as well.
+	//! the files of a partition nested inside another's location are not read for the outer one as well. Only a
+	//! complete plan knows every location; a partial one knows those of its own partitions.
 	unordered_map<string, vector<idx_t>> partitions_by_location;
 
 	//! Whether a partition's location is the table location or lies under it

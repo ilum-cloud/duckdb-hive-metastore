@@ -1,0 +1,81 @@
+# name: test/sql/hive/partitioned_spark_csv_options.test
+# description: A partitioned Spark CSV table is read in the dialect its options record, without sniffing files, so a filter on the partition column reads the selected partitions only
+# group: [hive]
+
+# duck_fixture_spark_csv_opts comes from the Spark seed (test/seed_hive_data_spark.py, step 14):
+# USING csv OPTIONS (header 'true', sep ';', nullValue 'NA', dateFormat 'dd/MM/yyyy') PARTITIONED BY (region),
+# rows 1 to 3 in region=eu, row 4 in region=us. Spark wrote NULL as NA, the empty string as "", and escaped the quotes
+# in 'say "hi"' with a backslash.
+
+require hive_metastore
+
+require-env HMS_TEST_AVAILABLE
+
+require httpfs
+
+require parquet
+
+statement ok
+CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER config, KEY_ID 'minioadmin', SECRET 'minioadmin', ENDPOINT 'localhost:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+ATTACH 'thrift://localhost:9083' AS hms (TYPE hive_metastore, METADATA_CACHE_TTL 3600);
+
+query TT
+SELECT name, type FROM pragma_table_info('hms.sample_db.duck_fixture_spark_csv_opts') ORDER BY cid;
+----
+id	INTEGER
+name	VARCHAR
+note	VARCHAR
+day	DATE
+region	VARCHAR
+
+# The rows Spark reads: no row lost to a NULL written as NA, a quoted separator or an escaped quote
+query ITTTTII
+SELECT id, name, note, day, region, name IS NULL, note IS NULL FROM hms.sample_db.duck_fixture_spark_csv_opts ORDER BY id;
+----
+1	alice	a;b	2024-01-01	eu	false	false
+2	bob	NULL	NULL	eu	false	true
+3	(empty)	say "hi"	2024-01-03	eu	false	false
+4	NA?	c:\dir	2024-01-04	us	false	false
+
+# Binding reads no file, so the metastore selects the partition and only its files are listed and read
+statement ok
+CALL hms_clear_cache();
+
+statement ok
+CALL enable_logging(level='debug', storage='memory');
+
+query IT
+SELECT id, note FROM hms.sample_db.duck_fixture_spark_csv_opts WHERE region = 'us';
+----
+4	c:\dir
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'hive_metastore partitions % table=duck_fixture_spark_csv_opts method=hms_filter selected=1 %';
+----
+1
+
+query II
+SELECT count(*) FILTER (WHERE url_decode(request.url) LIKE '%duck\_fixture\_spark\_csv\_opts/region=us/%' ESCAPE '\') > 0,
+       count(*) FILTER (WHERE url_decode(request.url) NOT LIKE '%duck\_fixture\_spark\_csv\_opts/region=us/%' ESCAPE '\')
+FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%duck\_fixture\_spark\_csv\_opts%' ESCAPE '\';
+----
+true	0
+
+# The same for a Spark CSV table with the default options
+statement ok
+CALL truncate_duckdb_logs();
+
+query IT
+SELECT id, name FROM hms.sample_db.duck_fixture_spark_csv_parts WHERE region = 'us';
+----
+3	carol
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE url_decode(request.url) LIKE '%duck\_fixture\_spark\_csv\_parts%' ESCAPE '\' AND url_decode(request.url) NOT LIKE '%duck\_fixture\_spark\_csv\_parts/region=us/%' ESCAPE '\';
+----
+0
+
+statement ok
+CALL disable_logging();

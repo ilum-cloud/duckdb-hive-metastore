@@ -1,17 +1,17 @@
 #include "storage/hms_multi_file_reader.hpp"
 
+#include "storage/hms_partition_filter.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
+
+#include <thread>
 
 namespace duckdb {
 
@@ -23,14 +23,111 @@ static constexpr idx_t ESTIMATED_BYTES_PER_ROW = 10;
 static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
 //! The keys one listing request returns at most (S3 and GCS; Azure returns more)
 static constexpr idx_t KEYS_PER_LISTING_REQUEST = 1000;
+//! How many partitions are listed at once when a filter selected the partitions
+static constexpr idx_t PREFETCH_PARTITIONS = 16;
+//! A filter's selection is listed together with one listing of the table location only from this many partitions on:
+//! fewer cost a few rounds of parallel listings at most
+static constexpr idx_t MIN_PARTITIONS_LISTED_TOGETHER = 256;
 
-HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<const HMSPartitionPlan> plan_p,
-                                           vector<idx_t> partition_indexes_p)
-    : LazyMultiFileList(&context), context(context), plan(std::move(plan_p)),
-      partition_indexes(std::move(partition_indexes_p)) {
+void HMSScanDiagnostics::Record(const HMSPartitionSelection &selection, idx_t selected_p) {
+	lock_guard<mutex> guard(lock);
+	recorded = true;
+	method = selection.method;
+	selected = selected_p;
+	hms_filter = selection.hms_filter;
+	reason = selection.reason;
 }
 
-optional_ptr<const vector<idx_t>> HMSPartitionFileList::PartitionsOwning(const string &path) const {
+InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &input) {
+	InsertionOrderPreservingMap<string> result;
+	result["Function"] = StringUtil::Upper(input.table_function.name);
+	auto &info = input.table_function.function_info->Cast<HMSScanFunctionInfo>();
+	if (info.cache->Mode() == HMSPartitionMode::PATH) {
+		return result;
+	}
+	auto &diagnostics = *info.diagnostics;
+	lock_guard<mutex> guard(diagnostics.lock);
+	if (!diagnostics.recorded) {
+		// No filter was about the partition columns alone: the scan selects every partition when it starts
+		result["HMS Partitions"] = "all, selected when the scan starts";
+		return result;
+	}
+	if (diagnostics.method == HMSPartitionMethod::PATH) {
+		result["HMS Partitions"] = "none registered, the files under the table location are read";
+	} else {
+		result["HMS Partitions"] =
+		    StringUtil::Format("%llu (%s)", diagnostics.selected, HMSPartitionMethodName(diagnostics.method));
+	}
+	if (!diagnostics.hms_filter.empty()) {
+		result["HMS Partition Filter"] = diagnostics.hms_filter;
+	}
+	if (!diagnostics.reason.empty()) {
+		result["HMS Partition Fallback"] = diagnostics.reason;
+	}
+	return result;
+}
+
+static void LogSelection(ClientContext &context, const HMSPartitionSchema &schema,
+                         const HMSPartitionSelection &selection, idx_t selected) {
+	DUCKDB_LOG_DEBUG(context,
+	                 "hive_metastore partitions db=%s table=%s method=%s selected=%d filter=\"%s\" reason=\"%s\"",
+	                 schema.database, schema.table, HMSPartitionMethodName(selection.method), selected,
+	                 selection.hms_filter, selection.reason);
+}
+
+HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
+                                           shared_ptr<HMSScanDiagnostics> diagnostics_p, FileGlobInput glob_input_p)
+    : LazyMultiFileList(&context), context(context), cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)),
+      glob_input(std::move(glob_input_p)), state(State::UNRESOLVED), binding(true) {
+}
+
+HMSPartitionFileList::HMSPartitionFileList(ClientContext &context, shared_ptr<HMSPartitionCache> cache_p,
+                                           shared_ptr<HMSScanDiagnostics> diagnostics_p, FileGlobInput glob_input_p,
+                                           shared_ptr<const HMSPartitionPlan> plan_p, vector<idx_t> partition_indexes_p,
+                                           ListingMode mode, optional_idx table_partitions_p)
+    : LazyMultiFileList(&context), context(context), cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)),
+      glob_input(std::move(glob_input_p)), state(State::PARTITIONS), binding(false), plan(std::move(plan_p)),
+      partition_indexes(std::move(partition_indexes_p)), listing_mode(mode), table_partitions(table_partitions_p) {
+}
+
+void HMSPartitionFileList::FinishBinding() const {
+	lock_guard<mutex> guard(lock);
+	binding = false;
+}
+
+bool HMSPartitionFileList::ReadsTableLocation() const {
+	lock_guard<mutex> guard(lock);
+	return state == State::TABLE_LOCATION;
+}
+
+void HMSPartitionFileList::UseSelectionLocked(const HMSPartitionSelection &selection) const {
+	if (!selection.plan) {
+		// No partition registered: the files under the table location, with values from their key=value paths
+		state = State::TABLE_LOCATION;
+		table_location_files =
+		    make_shared_ptr<GlobMultiFileList>(context, vector<string> {cache->Schema().root_glob}, glob_input);
+		table_location_files->InitializeScan(table_location_scan);
+		return;
+	}
+	state = State::PARTITIONS;
+	plan = selection.plan;
+	partition_indexes.clear();
+	for (idx_t i = 0; i < plan->partitions.size(); i++) {
+		partition_indexes.push_back(i);
+	}
+	listing_mode = plan->complete ? ListingMode::TOGETHER_IF_CHEAPER : ListingMode::PER_PARTITION;
+}
+
+void HMSPartitionFileList::ResolveLocked() const {
+	auto selection = cache->ResolveAll(context);
+	auto selected = selection.plan ? selection.plan->partitions.size() : 0;
+	diagnostics->Record(selection, selected);
+	LogSelection(context, cache->Schema(), selection, selected);
+	UseSelectionLocked(selection);
+}
+
+optional_ptr<const vector<idx_t>> HMSPartitionFileList::PartitionsOwning(const HMSPartitionPlan &plan,
+                                                                         const string &path) {
 	// Walk up from the file itself (a partition location can be a single file) to the first partition location
 	auto scheme_end = path.find("://");
 	idx_t min_length = scheme_end == string::npos ? 1 : scheme_end + 3;
@@ -39,8 +136,8 @@ optional_ptr<const vector<idx_t>> HMSPartitionFileList::PartitionsOwning(const s
 		location.pop_back();
 	}
 	while (location.size() >= min_length) {
-		auto entry = plan->partitions_by_location.find(location);
-		if (entry != plan->partitions_by_location.end()) {
+		auto entry = plan.partitions_by_location.find(location);
+		if (entry != plan.partitions_by_location.end()) {
 			return &entry->second;
 		}
 		auto slash = location.rfind('/');
@@ -53,31 +150,72 @@ optional_ptr<const vector<idx_t>> HMSPartitionFileList::PartitionsOwning(const s
 }
 
 bool HMSPartitionFileList::BelongsTo(const string &path, idx_t partition_index) const {
-	auto owners = PartitionsOwning(path);
+	auto owners = PartitionsOwning(*plan, path);
 	return owners && std::find(owners->begin(), owners->end(), partition_index) != owners->end();
 }
 
 vector<OpenFileInfo> HMSPartitionFileList::ListPartition(idx_t partition_index) const {
 	auto &partition = plan->partitions[partition_index];
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto list = [&](const string &pattern) {
-		auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
-		// A partition nested inside this one's location keeps its own files
-		files.erase(std::remove_if(files.begin(), files.end(),
-		                           [&](const OpenFileInfo &file) { return !BelongsTo(file.path, partition_index); }),
-		            files.end());
-		return files;
-	};
-	auto files = list(partition.scan_location);
-	if (files.empty() && !partition.fallback_scan_location.empty()) {
-		// Hive writes data files without an extension (`000000_0`), so the format's pattern matches nothing
-		files = list(partition.fallback_scan_location);
-	}
+	// One listing of everything under the location; the format's pattern picks the data files from it, else Hive's
+	// pattern for the files it writes without an extension (`000000_0`). Globbing each pattern would list twice.
+	// `/**/*` rather than `/**`: on a local file system a trailing `**` skips symlinked files.
+	auto pattern = partition.fallback_scan_location.empty() ? partition.scan_location : partition.location + "/**/*";
+	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
+	// A partition nested inside this one's location keeps its own files
+	files.erase(std::remove_if(files.begin(), files.end(),
+	                           [&](const OpenFileInfo &file) { return !BelongsTo(file.path, partition_index); }),
+	            files.end());
+	files = SelectDataFiles(partition, std::move(files));
 	if (files.empty() && fs.FileExists(partition.location)) {
 		// A partition location that points at a single file rather than a directory
 		files.emplace_back(partition.location);
 	}
 	return files;
+}
+
+//! Whether a file lies directly in a partition's directory (or is the partition's location itself)
+static bool IsDirectChild(const string &path, const string &location) {
+	if (path == location) {
+		return true;
+	}
+	auto prefix = location + "/";
+	if (!StringUtil::StartsWith(path, prefix)) {
+		return false;
+	}
+	return path.find('/', prefix.size()) == string::npos;
+}
+
+void HMSPartitionFileList::DropNestedPartitionFiles(idx_t partition_index, vector<OpenFileInfo> &files) const {
+	auto &partition = plan->partitions[partition_index];
+	bool deeper = false;
+	for (auto &file : files) {
+		if (!IsDirectChild(file.path, partition.location)) {
+			deeper = true;
+			break;
+		}
+	}
+	if (!deeper) {
+		return;
+	}
+	// A subdirectory may be the location of a partition the filter left out, which this partial plan does not know
+	if (!ownership) {
+		ownership = cache->CompletePlan(context);
+		DUCKDB_LOG_DEBUG(
+		    context,
+		    "hive_metastore partitions db=%s table=%s fetched the complete partition list: partition \"%s\" "
+		    "has files below its directory",
+		    cache->Schema().database, cache->Schema().table, partition.name);
+	}
+	files.erase(std::remove_if(files.begin(), files.end(),
+	                           [&](const OpenFileInfo &file) {
+		                           auto owners = PartitionsOwning(*ownership, file.path);
+		                           if (!owners || owners->empty()) {
+			                           return false;
+		                           }
+		                           return ownership->partitions[owners->front()].location != partition.location;
+	                           }),
+	            files.end());
 }
 
 //! The file name part of a partition's glob pattern: what follows the last slash
@@ -122,11 +260,14 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 		return;
 	}
 	bool cheaper;
-	if (plan->files_under_table_location.IsValid()) {
+	if (plan->complete && plan->files_under_table_location.IsValid()) {
 		auto files = plan->files_under_table_location.GetIndex();
 		cheaper = (files + KEYS_PER_LISTING_REQUEST - 1) / KEYS_PER_LISTING_REQUEST < positions.size();
-	} else {
+	} else if (plan->complete) {
 		cheaper = positions.size() * 2 > plan->partitions_under_table_location;
+	} else {
+		// A filter's selection knows only its own partitions: compare with every partition the table has
+		cheaper = table_partitions.IsValid() && positions.size() * 2 >= table_partitions.GetIndex();
 	}
 	if (!cheaper) {
 		return;
@@ -141,9 +282,9 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 		is_listed_together[position] = true;
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	for (auto &file : fs.GlobFiles(plan->table_location + "/**", FileGlobOptions::ALLOW_EMPTY)) {
+	for (auto &file : fs.GlobFiles(plan->table_location + "/**/*", FileGlobOptions::ALLOW_EMPTY)) {
 		// Files of partitions not being read, and of directories no partition points at, are left out
-		auto owners = PartitionsOwning(file.path);
+		auto owners = PartitionsOwning(*plan, file.path);
 		if (!owners) {
 			continue;
 		}
@@ -156,40 +297,138 @@ void HMSPartitionFileList::ListTogetherIfCheaper() const {
 	}
 }
 
-bool HMSPartitionFileList::ExpandNextPath() const {
-	if (next_partition >= partition_indexes.size()) {
-		return false;
+void HMSPartitionFileList::PrefetchFrom(idx_t position) const {
+	// List the partitions not listed together with the table location several at once, so a wide selection does not
+	// pay one request after another. The scan's other threads wait on the list lock meanwhile, so the work cannot go
+	// to the task scheduler; plain threads do it.
+	if (context.interrupted) {
+		throw InterruptException();
 	}
-	if (!listing_decided) {
-		listing_decided = true;
-		ListTogetherIfCheaper();
+	auto end = MinValue<idx_t>(position + PREFETCH_PARTITIONS, partition_indexes.size());
+	auto count = end - position;
+	vector<vector<OpenFileInfo>> results(count);
+	vector<ErrorData> errors(count);
+	auto list = [&](idx_t i) {
+		if (!is_listed_together.empty() && is_listed_together[position + i]) {
+			return;
+		}
+		try {
+			results[i] = ListPartition(partition_indexes[position + i]);
+		} catch (std::exception &ex) {
+			errors[i] = ErrorData(ex);
+		}
+	};
+	vector<std::thread> threads;
+	idx_t started = 0;
+	if (count > 1) {
+		try {
+			for (; started < count; started++) {
+				threads.emplace_back(list, started);
+			}
+		} catch (std::exception &) {
+			// No more threads to be had: list the rest on this one
+		}
 	}
-	auto position = next_partition++;
-	auto partition_index = partition_indexes[position];
-	auto &partition = plan->partitions[partition_index];
+	for (idx_t i = started; i < count; i++) {
+		list(i);
+	}
+	for (auto &thread : threads) {
+		thread.join();
+	}
+	for (auto &error : errors) {
+		if (error.HasError()) {
+			error.Throw();
+		}
+	}
+	if (!plan->complete) {
+		for (idx_t i = 0; i < count; i++) {
+			DropNestedPartitionFiles(partition_indexes[position + i], results[i]);
+		}
+	}
+	prefetched = std::move(results);
+	prefetched_from = position;
+}
 
-	vector<OpenFileInfo> files;
-	if (!is_listed_together.empty() && is_listed_together[position]) {
-		files = SelectDataFiles(partition, std::move(listed_together[position]));
-	} else {
-		files = ListPartition(partition_index);
+void HMSPartitionFileList::AddPartitionFiles(idx_t partition_index, vector<OpenFileInfo> files) const {
+	auto &partition = plan->partitions[partition_index];
+	auto &names = cache->Schema().names;
+	child_list_t<Value> fields;
+	for (idx_t i = 0; i < names.size(); i++) {
+		fields.emplace_back(names[i], partition.values[i]);
 	}
+	auto values = Value::STRUCT(std::move(fields));
 	std::sort(files.begin(), files.end());
 	for (auto &file : files) {
 		// Keep whatever the glob attached (file size, modification time, etag: the Parquet metadata cache uses them)
-		// and record which partition the file belongs to
+		// and record the partition's values, so the file carries them wherever the scan copies it
 		auto extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
 		if (file.extended_info) {
 			extended_info->options = file.extended_info->options;
 		}
-		extended_info->options[HMS_PARTITION_INDEX_KEY] = Value::UBIGINT(partition_index);
+		extended_info->options[HMS_PARTITION_VALUES_KEY] = values;
 		file.extended_info = std::move(extended_info);
 		expanded_files.push_back(std::move(file));
 	}
+}
+
+bool HMSPartitionFileList::ExpandNextPath() const {
+	if (state == State::UNRESOLVED) {
+		ResolveLocked();
+	}
+	if (state == State::TABLE_LOCATION) {
+		OpenFileInfo file;
+		if (!table_location_files->Scan(table_location_scan, file)) {
+			return false;
+		}
+		expanded_files.push_back(std::move(file));
+		return true;
+	}
+	if (next_partition >= partition_indexes.size()) {
+		return false;
+	}
+	auto position = next_partition++;
+	auto partition_index = partition_indexes[position];
+
+	vector<OpenFileInfo> files;
+	if (listing_mode == ListingMode::TOGETHER_IF_CHEAPER && !listing_decided) {
+		listing_decided = true;
+		ListTogetherIfCheaper();
+	}
+	if (!is_listed_together.empty() && is_listed_together[position]) {
+		files = SelectDataFiles(plan->partitions[partition_index], std::move(listed_together[position]));
+		if (!plan->complete) {
+			DropNestedPartitionFiles(partition_index, files);
+		}
+	} else {
+		if (position < prefetched_from || position >= prefetched_from + prefetched.size()) {
+			PrefetchFrom(position);
+		}
+		files = std::move(prefetched[position - prefetched_from]);
+	}
+	AddPartitionFiles(partition_index, std::move(files));
 	return true;
 }
 
+FileExpandResult HMSPartitionFileList::GetExpandResult() const {
+	{
+		lock_guard<mutex> guard(lock);
+		if (state == State::UNRESOLVED && binding) {
+			// Binding asks only whether there is more than one file, before the filters are known. Selecting the
+			// partitions now would fetch all of them; the answer only tunes the scan, so assume several.
+			return FileExpandResult::MULTIPLE_FILES;
+		}
+	}
+	return LazyMultiFileList::GetExpandResult();
+}
+
 vector<OpenFileInfo> HMSPartitionFileList::GetDisplayFileList(optional_idx max_files) const {
+	lock_guard<mutex> guard(lock);
+	if (state == State::UNRESOLVED) {
+		return {OpenFileInfo(cache->Schema().table_location)};
+	}
+	if (state == State::TABLE_LOCATION) {
+		return table_location_files->GetDisplayFileList(max_files);
+	}
 	vector<OpenFileInfo> result;
 	for (auto partition_index : partition_indexes) {
 		if (max_files.IsValid() && result.size() >= max_files.GetIndex()) {
@@ -201,6 +440,15 @@ vector<OpenFileInfo> HMSPartitionFileList::GetDisplayFileList(optional_idx max_f
 }
 
 unique_ptr<NodeStatistics> HMSPartitionFileList::GetCardinality(ClientContext &context_p) const {
+	{
+		lock_guard<mutex> guard(lock);
+		if (state == State::UNRESOLVED) {
+			ResolveLocked();
+		}
+	}
+	if (state == State::TABLE_LOCATION) {
+		return table_location_files->GetCardinality(context_p);
+	}
 	// The scan binds to the table's columns without opening a data file, so DuckDB has no file to estimate from: it
 	// would report 0 rows for a single file. Estimate here instead, first from the statistics the metastore holds
 	// for the partitions left to scan (Hive records the row count, Hive and Spark the size in bytes)
@@ -262,83 +510,75 @@ unique_ptr<NodeStatistics> HMSPartitionFileList::GetCardinality(ClientContext &c
 	return make_uniq<NodeStatistics>(estimate);
 }
 
-// Replaces references to partition columns with the value this partition has for them, so the filter can be folded
-static void ConvertPartitionColumnsToConstants(unique_ptr<Expression> &expr,
-                                               const unordered_map<column_t, Value> &partition_values,
-                                               idx_t table_index) {
-	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		auto &bound_colref = expr->Cast<BoundColumnRefExpression>();
-		if (table_index != bound_colref.binding.table_index) {
-			return;
-		}
-		auto lookup = partition_values.find(bound_colref.binding.column_index);
-		if (lookup != partition_values.end()) {
-			expr = make_uniq<BoundConstantExpression>(lookup->second);
-		}
-		return;
-	}
-	ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-		ConvertPartitionColumnsToConstants(child, partition_values, table_index);
-	});
-}
-
-//! Which of the columns the scan produces are partition columns: scan column index -> index into plan.names
-static unordered_map<column_t, idx_t> PartitionColumnIds(const MultiFilePushdownInfo &info,
-                                                         const HMSPartitionPlan &plan) {
-	unordered_map<column_t, idx_t> result;
-	for (idx_t i = 0; i < info.column_ids.size(); i++) {
-		auto column_id = info.column_ids[i];
-		if (IsVirtualColumn(column_id) || column_id >= info.column_names.size()) {
-			continue;
-		}
-		for (idx_t k = 0; k < plan.names.size(); k++) {
-			if (StringUtil::CIEquals(info.column_names[column_id], plan.names[k])) {
-				result[i] = k;
-				break;
-			}
-		}
-	}
-	return result;
-}
-
-enum class PartitionFilterResult : uint8_t {
-	//! The filter needs more than the partition values given, so it can only run over the rows
-	NEEDS_ROWS,
-	PASSES,
-	FAILS
-};
-
-//! Evaluates a filter with the partition columns replaced by the values given
-static PartitionFilterResult EvaluatePartitionFilter(ClientContext &context, const Expression &filter,
-                                                     const unordered_map<column_t, Value> &values, idx_t table_index) {
-	auto filter_copy = filter.Copy();
-	ConvertPartitionColumnsToConstants(filter_copy, values, table_index);
-	Value result;
-	if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
-	    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
-		return PartitionFilterResult::NEEDS_ROWS;
-	}
-	return result.IsNull() || !result.GetValue<bool>() ? PartitionFilterResult::FAILS : PartitionFilterResult::PASSES;
-}
-
 unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientContext &context_p,
                                                                       const MultiFileOptions &options,
                                                                       MultiFilePushdownInfo &info,
                                                                       vector<unique_ptr<Expression>> &filters) const {
-	if (filters.empty() || plan->names.empty()) {
+	auto &schema = cache->Schema();
+	if (filters.empty() || schema.names.empty()) {
 		return nullptr;
 	}
-	auto partition_column_ids = PartitionColumnIds(info, *plan);
+	auto partition_column_ids = PartitionColumnIds(info, schema.names);
 	if (partition_column_ids.empty()) {
 		return nullptr;
 	}
 
+	State current_state;
+	shared_ptr<const HMSPartitionPlan> current_plan;
+	vector<idx_t> current_indexes;
+	{
+		lock_guard<mutex> guard(lock);
+		current_state = state;
+		current_plan = plan;
+		current_indexes = partition_indexes;
+	}
+	if (current_state == State::TABLE_LOCATION) {
+		// The reader prunes the files under the table location on their key=value paths
+		return nullptr;
+	}
+
+	HMSPartitionSelection selection;
+	bool resolved_now = false;
+	if (current_state == State::UNRESOLVED) {
+		// Select the partitions now that the filters are known, if a filter is about partition columns alone. A filter
+		// holding a prepared statement parameter is not: the statement is bound again with the value when executed.
+		bool usable = false;
+		for (auto &filter : filters) {
+			if (filter->HasParameter()) {
+				return nullptr;
+			}
+			if (ReferencesOnlyPartitionColumns(*filter, partition_column_ids, info.table_index)) {
+				usable = true;
+			}
+		}
+		if (!usable) {
+			return nullptr;
+		}
+		selection = cache->ResolveForFilters(context_p, filters, info, partition_column_ids);
+		if (!selection.plan) {
+			diagnostics->Record(selection, 0);
+			LogSelection(context_p, schema, selection, 0);
+			auto result = make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input);
+			lock_guard<mutex> guard(result->lock);
+			result->binding = false;
+			result->UseSelectionLocked(selection);
+			return std::move(result);
+		}
+		current_plan = selection.plan;
+		current_indexes.clear();
+		for (idx_t i = 0; i < current_plan->partitions.size(); i++) {
+			current_indexes.push_back(i);
+		}
+		resolved_now = true;
+	}
+
+	// Prune on the values the metastore holds for each partition
 	vector<idx_t> kept;
 	vector<bool> have_preserved_filter(filters.size(), false);
 	vector<unique_ptr<Expression>> preserved_filters;
 	unordered_set<idx_t> filters_applied;
-	for (auto partition_index : partition_indexes) {
-		auto &partition = plan->partitions[partition_index];
+	for (auto partition_index : current_indexes) {
+		auto &partition = current_plan->partitions[partition_index];
 		unordered_map<column_t, Value> partition_values;
 		for (auto &entry : partition_column_ids) {
 			partition_values[entry.first] = partition.values[entry.second];
@@ -354,9 +594,11 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 				}
 			} else if (result == PartitionFilterResult::FAILS) {
 				prune = true;
-				if (filters_applied.find(i) == filters_applied.end()) {
+				if (filters_applied.insert(i).second) {
+					if (!info.extra_info.file_filters.empty()) {
+						info.extra_info.file_filters += " AND ";
+					}
 					info.extra_info.file_filters += filters[i]->ToString();
-					filters_applied.insert(i);
 				}
 			}
 		}
@@ -364,44 +606,78 @@ unique_ptr<MultiFileList> HMSPartitionFileList::ComplexFilterPushdown(ClientCont
 			kept.push_back(partition_index);
 		}
 	}
-	if (kept.size() == partition_indexes.size()) {
+	if (resolved_now) {
+		diagnostics->Record(selection, kept.size());
+		LogSelection(context_p, schema, selection, kept.size());
+	}
+	if (!resolved_now && kept.size() == current_indexes.size()) {
 		return nullptr;
 	}
-	info.extra_info.total_files = partition_indexes.size();
-	info.extra_info.filtered_files = kept.size();
-	filters = std::move(preserved_filters);
-	return make_uniq<HMSPartitionFileList>(context_p, plan, std::move(kept));
+	if (kept.size() < current_indexes.size()) {
+		if (current_plan->complete) {
+			info.extra_info.total_files = current_plan->partitions.size();
+			info.extra_info.filtered_files = kept.size();
+		}
+		filters = std::move(preserved_filters);
+	}
+	// Every partition of the table is read: one listing of the table location may be cheapest. A filter selected the
+	// partitions: list each of them, unless they are most of the table's partitions (a weak filter), where one listing
+	// of the table location takes far fewer requests.
+	auto mode = ListingMode::PER_PARTITION;
+	optional_idx table_partitions;
+	if (current_plan->complete && kept.size() == current_plan->partitions.size()) {
+		mode = ListingMode::TOGETHER_IF_CHEAPER;
+	} else {
+		idx_t under_table_location = 0;
+		for (auto partition_index : kept) {
+			if (current_plan->IsUnderTableLocation(current_plan->partitions[partition_index])) {
+				under_table_location++;
+			}
+		}
+		if (under_table_location >= MIN_PARTITIONS_LISTED_TOGETHER) {
+			table_partitions = current_plan->complete ? optional_idx(current_plan->partitions_under_table_location)
+			                                          : cache->PartitionCount(context_p);
+			if (table_partitions.IsValid() && under_table_location * 2 >= table_partitions.GetIndex()) {
+				mode = ListingMode::TOGETHER_IF_CHEAPER;
+				DUCKDB_LOG_DEBUG(context_p,
+				                 "hive_metastore listing db=%s table=%s the table location, once: %d of its %d "
+				                 "partitions are selected",
+				                 schema.database, schema.table, under_table_location, table_partitions.GetIndex());
+			}
+		}
+	}
+	return make_uniq<HMSPartitionFileList>(context_p, cache, diagnostics, glob_input, current_plan, std::move(kept),
+	                                       mode, table_partitions);
 }
 
-HMSMultiFileReader::HMSMultiFileReader(shared_ptr<const HMSPartitionPlan> plan_p, vector<string> column_names_p,
+HMSMultiFileReader::HMSMultiFileReader(shared_ptr<HMSPartitionCache> cache_p,
+                                       shared_ptr<HMSScanDiagnostics> diagnostics_p, vector<string> column_names_p,
                                        vector<LogicalType> column_types_p, bool bind_to_table_columns_p)
-    : plan(std::move(plan_p)), column_names(std::move(column_names_p)), column_types(std::move(column_types_p)),
-      bind_to_table_columns(bind_to_table_columns_p) {
+    : cache(std::move(cache_p)), diagnostics(std::move(diagnostics_p)), column_names(std::move(column_names_p)),
+      column_types(std::move(column_types_p)), bind_to_table_columns(bind_to_table_columns_p) {
 	D_ASSERT(column_names.size() == column_types.size());
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::CreateInstance(const TableFunction &table_function) {
 	if (!table_function.function_info) {
-		throw InternalException("HMSMultiFileReader: the scan function carries no partition plan");
+		throw InternalException("HMSMultiFileReader: the scan function carries no partition metadata");
 	}
 	auto &info = table_function.function_info->Cast<HMSScanFunctionInfo>();
-	return make_uniq<HMSMultiFileReader>(info.plan, info.column_names, info.column_types, info.bind_to_table_columns);
+	return make_uniq<HMSMultiFileReader>(info.cache, info.diagnostics, info.column_names, info.column_types,
+	                                     info.bind_to_table_columns);
 }
 
 unique_ptr<MultiFileReader> HMSMultiFileReader::Copy() const {
-	return make_uniq<HMSMultiFileReader>(plan, column_names, column_types, bind_to_table_columns);
+	return make_uniq<HMSMultiFileReader>(cache, diagnostics, column_names, column_types, bind_to_table_columns);
 }
 
 shared_ptr<MultiFileList> HMSMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,
                                                              const FileGlobInput &glob_input) {
-	if (plan->source != HMSPartitionSource::HMS) {
+	if (cache->Mode() == HMSPartitionMode::PATH) {
 		return MultiFileReader::CreateFileList(context, paths, glob_input);
 	}
-	vector<idx_t> partition_indexes;
-	for (idx_t i = 0; i < plan->partitions.size(); i++) {
-		partition_indexes.push_back(i);
-	}
-	return make_shared_ptr<HMSPartitionFileList>(context, plan, std::move(partition_indexes));
+	// The partitions are selected once the filters are known, so the metastore can select them
+	return make_shared_ptr<HMSPartitionFileList>(context, cache, diagnostics, glob_input);
 }
 
 bool HMSMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
@@ -438,19 +714,25 @@ void HMSMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &f
 
 	// When the format bound its own way (CSV), add the partition columns, in the order the metastore declares them,
 	// as the table does. Bound to the table's columns, they are there already.
-	for (idx_t i = 0; i < plan->names.size(); i++) {
+	auto &schema = cache->Schema();
+	for (idx_t i = 0; i < schema.names.size(); i++) {
 		bool found = false;
 		for (idx_t col = 0; col < names.size(); col++) {
-			if (StringUtil::CIEquals(names[col], plan->names[i])) {
-				return_types[col] = plan->types[i];
+			if (StringUtil::CIEquals(names[col], schema.names[i])) {
+				return_types[col] = schema.types[i];
 				found = true;
 				break;
 			}
 		}
 		if (!found) {
-			names.push_back(plan->names[i]);
-			return_types.push_back(plan->types[i]);
+			names.push_back(schema.names[i]);
+			return_types.push_back(schema.types[i]);
 		}
+	}
+	// Binding is the last step that runs before the filters are known
+	auto partition_files = dynamic_cast<HMSPartitionFileList *>(&files);
+	if (partition_files) {
+		partition_files->FinishBinding();
 	}
 }
 
@@ -458,17 +740,34 @@ unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContex
                                                                     const MultiFileOptions &options,
                                                                     MultiFilePushdownInfo &info,
                                                                     vector<unique_ptr<Expression>> &filters) {
-	if (plan->source != HMSPartitionSource::PATH) {
-		// The partition list prunes on the values the metastore holds
-		return MultiFileReader::ComplexFilterPushdown(context, files, options, info, filters);
+	auto partition_files = dynamic_cast<HMSPartitionFileList *>(&files);
+	if (!partition_files) {
+		// PARTITION_MODE 'path', or files under the table location pruned before
+		return PrunePathFiles(context, files, info, filters);
 	}
-	// Path mode: drop the files whose key=value path values cannot satisfy the filters, before they are opened. A value
-	// the path does not carry may come from the file itself, so that says nothing, and every filter still runs over
-	// the rows of the files kept.
-	if (filters.empty() || plan->names.empty()) {
+	auto result = partition_files->ComplexFilterPushdown(context, options, info, filters);
+	auto &selected = result ? *result : files;
+	auto selected_partition_files = dynamic_cast<HMSPartitionFileList *>(&selected);
+	if (selected_partition_files && selected_partition_files->ReadsTableLocation()) {
+		auto pruned = PrunePathFiles(context, selected, info, filters);
+		if (pruned) {
+			return pruned;
+		}
+	}
+	return result;
+}
+
+unique_ptr<MultiFileList> HMSMultiFileReader::PrunePathFiles(ClientContext &context, MultiFileList &files,
+                                                             MultiFilePushdownInfo &info,
+                                                             vector<unique_ptr<Expression>> &filters) const {
+	// Drop the files whose key=value path values cannot satisfy the filters, before they are opened. A value the path
+	// does not carry may come from the file itself, so that says nothing, and every filter still runs over the rows
+	// of the files kept.
+	auto &schema = cache->Schema();
+	if (filters.empty() || schema.names.empty()) {
 		return nullptr;
 	}
-	auto partition_column_ids = PartitionColumnIds(info, *plan);
+	auto partition_column_ids = PartitionColumnIds(info, schema.names);
 	if (partition_column_ids.empty()) {
 		return nullptr;
 	}
@@ -479,13 +778,13 @@ unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContex
 		auto path_values = HivePartitioning::Parse(file.path);
 		unordered_map<column_t, Value> values;
 		for (auto &entry : partition_column_ids) {
-			auto path_value = path_values.find(plan->names[entry.second]);
+			auto path_value = path_values.find(schema.names[entry.second]);
 			if (path_value == path_values.end()) {
 				continue;
 			}
 			try {
-				values[entry.first] = HivePartitioning::GetValue(context, plan->names[entry.second], path_value->second,
-				                                                 plan->types[entry.second]);
+				values[entry.first] = HivePartitioning::GetValue(context, schema.names[entry.second],
+				                                                 path_value->second, schema.types[entry.second]);
 			} catch (std::exception &) {
 				// A value that does not convert is reported when the file is read
 			}
@@ -496,6 +795,9 @@ unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContex
 			    PartitionFilterResult::FAILS) {
 				prune = true;
 				if (filters_applied.insert(i).second) {
+					if (!info.extra_info.file_filters.empty()) {
+						info.extra_info.file_filters += " AND ";
+					}
 					info.extra_info.file_filters += filters[i]->ToString();
 				}
 				break;
@@ -515,31 +817,26 @@ unique_ptr<MultiFileList> HMSMultiFileReader::ComplexFilterPushdown(ClientContex
 
 vector<Value> HMSMultiFileReader::ValuesForFile(ClientContext &context, const BaseFileReader &reader,
                                                 vector<bool> &present) const {
-	present.assign(plan->names.size(), true);
-	if (plan->source == HMSPartitionSource::HMS) {
-		if (reader.file.extended_info) {
-			auto entry = reader.file.extended_info->options.find(HMS_PARTITION_INDEX_KEY);
-			if (entry != reader.file.extended_info->options.end()) {
-				auto partition_index = entry->second.GetValue<uint64_t>();
-				if (partition_index < plan->partitions.size()) {
-					return plan->partitions[partition_index].values;
-				}
-			}
+	auto &schema = cache->Schema();
+	present.assign(schema.names.size(), true);
+	if (reader.file.extended_info) {
+		auto entry = reader.file.extended_info->options.find(HMS_PARTITION_VALUES_KEY);
+		if (entry != reader.file.extended_info->options.end()) {
+			return StructValue::GetChildren(entry->second);
 		}
-		throw InternalException("HMSMultiFileReader: file \"%s\" does not belong to a partition", reader.GetFileName());
 	}
-	// Path mode: take what the file path encodes. A value it does not carry comes from the file, which some writers
-	// store partition values in, and is NULL if the file does not have the column either.
+	// A file under the table location: take what its path encodes. A value it does not carry comes from the file,
+	// which some writers store partition values in, and is NULL if the file does not have the column either.
 	auto path_values = HivePartitioning::Parse(reader.GetFileName());
 	vector<Value> values;
-	for (idx_t i = 0; i < plan->names.size(); i++) {
-		auto entry = path_values.find(plan->names[i]);
+	for (idx_t i = 0; i < schema.names.size(); i++) {
+		auto entry = path_values.find(schema.names[i]);
 		if (entry == path_values.end()) {
 			present[i] = false;
-			values.push_back(Value(plan->types[i]));
+			values.push_back(Value(schema.types[i]));
 			continue;
 		}
-		values.push_back(HivePartitioning::GetValue(context, plan->names[i], entry->second, plan->types[i]));
+		values.push_back(HivePartitioning::GetValue(context, schema.names[i], entry->second, schema.types[i]));
 	}
 	return values;
 }
@@ -551,7 +848,8 @@ void HMSMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const Mu
                                       optional_ptr<MultiFileReaderGlobalState> global_state) {
 	MultiFileReader::FinalizeBind(reader_data, file_options, options, global_columns, global_column_ids, context,
 	                              global_state);
-	if (plan->names.empty() || !reader_data.reader) {
+	auto &schema = cache->Schema();
+	if (schema.names.empty() || !reader_data.reader) {
 		return;
 	}
 	vector<bool> present;
@@ -561,8 +859,8 @@ void HMSMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const Mu
 		if (IsVirtualColumn(column_id) || column_id >= global_columns.size()) {
 			continue;
 		}
-		for (idx_t k = 0; k < plan->names.size(); k++) {
-			if (StringUtil::CIEquals(global_columns[column_id].name, plan->names[k])) {
+		for (idx_t k = 0; k < schema.names.size(); k++) {
+			if (StringUtil::CIEquals(global_columns[column_id].name, schema.names[k])) {
 				if (present[k]) {
 					reader_data.constant_map.Add(MultiFileGlobalIndex(i), values[k]);
 				}
