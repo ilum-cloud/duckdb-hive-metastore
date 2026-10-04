@@ -616,8 +616,10 @@ unique_ptr<NodeStatistics> HMSPartitionFileList::GetCardinality(ClientContext &c
 		// The partitions are selected when the scan starts, once join filters are known: estimate from a sample
 		auto sample = cache->SampleForEstimate(context_p);
 		if (sample.plan && !(sample.plan->complete && sample.plan->partitions.empty())) {
+			// The count can lag behind the sample (names cached earlier), never below it
 			auto table_partitions =
-			    sample.table_partitions.IsValid() ? sample.table_partitions.GetIndex() : sample.plan->partitions.size();
+			    MaxValue<idx_t>(sample.table_partitions.IsValid() ? sample.table_partitions.GetIndex() : 0,
+			                    sample.plan->partitions.size());
 			auto estimate = EstimateFromSample(*sample.plan, table_partitions);
 			lock_guard<mutex> guard(lock);
 			unresolved_estimate = estimate;
@@ -1011,7 +1013,9 @@ unique_ptr<MultiFileList> HMSMultiFileReader::DynamicFilterPushdown(
     ClientContext &context, const MultiFileList &files, const MultiFileOptions &options, const vector<string> &names,
     const vector<LogicalType> &types, const vector<column_t> &column_ids, TableFilterSet &filters) {
 	auto &schema = cache->Schema();
-	if (schema.names.empty() || filters.filters.empty() || !cache->DynamicPruning()) {
+	if (schema.names.empty() || filters.filters.empty() || !cache->DynamicPruning() || !bind_to_table_columns) {
+		// A CSV scan takes no join filters, and its global state counts the files of the list it was bound with,
+		// which would select every partition besides those selected here
 		return nullptr;
 	}
 	// The filters as expressions over this scan's columns, the way DuckDB's own pushdown makes them. Static filters

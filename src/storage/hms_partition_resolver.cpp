@@ -509,6 +509,8 @@ HMSPartitionSelection HMSPartitionCache::ResolveForFilters(ClientContext &contex
 		HMSPartitionSelection selection;
 		selection.method = HMSPartitionMethod::CACHED_PLAN;
 		selection.plan = std::move(cached);
+		// The sample a row estimate took may have put it there, which configured nothing
+		ConfigureStorage(context, *selection.plan);
 		return selection;
 	}
 	HMSPartitionSelection selection;
