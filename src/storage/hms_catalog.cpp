@@ -33,12 +33,13 @@ namespace duckdb {
 HMSCatalog::HMSCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
                        string endpoint_p, const string &default_schema, const string &warehouse_location,
                        string catalog_name_p, idx_t metadata_cache_ttl_seconds, HMSPartitionMode partition_mode,
-                       HMSPartitionFilterPushdown partition_filter_pushdown)
+                       HMSPartitionFilterPushdown partition_filter_pushdown, bool dynamic_partition_pruning)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
       endpoint(std::move(endpoint_p)), warehouse_location(warehouse_location), schemas(*this),
       default_schema(default_schema), catalog_name(std::move(catalog_name_p)),
       metadata_cache_ttl(std::chrono::seconds(metadata_cache_ttl_seconds)), partition_mode(partition_mode),
-      partition_filter_pushdown(partition_filter_pushdown), cache_generation(0) {
+      partition_filter_pushdown(partition_filter_pushdown), dynamic_partition_pruning(dynamic_partition_pruning),
+      cache_generation(0) {
 }
 
 HMSCatalog::~HMSCatalog() = default;

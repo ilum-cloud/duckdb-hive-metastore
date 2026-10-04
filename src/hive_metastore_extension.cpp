@@ -18,6 +18,7 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 	idx_t metadata_cache_ttl_seconds = HMSCatalog::DEFAULT_METADATA_CACHE_TTL_SECONDS;
 	auto partition_mode = HMSPartitionMode::AUTO;
 	auto partition_filter_pushdown = HMSPartitionFilterPushdown::EXACT;
+	bool dynamic_partition_pruning = true;
 	for (auto &entry : info.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "type" || lower_name == "read_only") {
@@ -55,6 +56,14 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 				throw BinderException("PARTITION_FILTER_PUSHDOWN must be one of 'exact', 'all', 'off', got: %s",
 				                      pushdown);
 			}
+		} else if (lower_name == "dynamic_partition_pruning") {
+			Value enabled;
+			string error;
+			if (!entry.second.DefaultTryCastAs(LogicalType::BOOLEAN, enabled, &error) || enabled.IsNull()) {
+				throw BinderException("DYNAMIC_PARTITION_PRUNING must be true or false, got: %s",
+				                      entry.second.ToString());
+			}
+			dynamic_partition_pruning = BooleanValue::Get(enabled);
 		} else {
 			throw BinderException("Unrecognized option for HMS attach: %s", entry.first);
 		}
@@ -66,7 +75,8 @@ static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> s
 
 	string catalog_name = "hive_metastore";
 	return make_uniq<HMSCatalog>(db, info.path, attach_options, info.path, default_schema, warehouse_location,
-	                             catalog_name, metadata_cache_ttl_seconds, partition_mode, partition_filter_pushdown);
+	                             catalog_name, metadata_cache_ttl_seconds, partition_mode, partition_filter_pushdown,
+	                             dynamic_partition_pruning);
 }
 
 static unique_ptr<TransactionManager> CreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

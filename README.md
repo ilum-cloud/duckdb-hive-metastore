@@ -153,6 +153,7 @@ ATTACH 'thrift://<host>:<port>' AS <catalog_name> (<options>);
   - `METADATA_CACHE_TTL`: How many seconds table and database metadata loaded from the metastore is reused before it is revalidated. Defaults to `5`; `0` revalidates in every transaction. See [Metadata caching](#metadata-caching).
   - `PARTITION_MODE`: How the files of a partitioned table are located: `auto` (default), `hms` or `path`. See [Partitioned tables](#partitioned-tables).
   - `PARTITION_FILTER_PUSHDOWN`: Which filters on partition columns the metastore evaluates: `exact` (default), `all` or `off`. See [Filters the metastore evaluates](#filters-the-metastore-evaluates).
+  - `DYNAMIC_PARTITION_PRUNING`: Whether the keys a join pushes into a partitioned scan select its partitions: `true` (default) or `false`. See [Partitions selected by a join](#partitions-selected-by-a-join).
 
 **Example:**
 
@@ -171,7 +172,9 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
   regardless of the layout. Hive's `__HIVE_DEFAULT_PARTITION__` reads back as `NULL`.
 - **A filter on partition columns selects the partitions.** The metastore returns only the partitions that can
   match, and only their locations are listed, 16 at a time. A weak filter that keeps at least half of the table's
-  partitions (and 256 or more) lists the table location once instead, which takes far fewer requests. See
+  partitions (and 256 or more) lists the table location once instead, which takes far fewer requests. So does a
+  selection whose first 16 partitions show the table location holds few enough files: one listing of it, at a
+  request per thousand files, beats the rounds of listings left. See
   [Filters the metastore evaluates](#filters-the-metastore-evaluates).
 - **Only registered partitions are read.** Directories under the table location that no partition points at are
   skipped, and a file belongs to the partition at the deepest location containing it, so a partition nested inside
@@ -185,8 +188,9 @@ A partitioned Parquet, CSV (text) or Avro table is read through the partitions r
   is `NULL` for their rows.
 - **Partition columns come last, in the order the metastore declares them.** For a table partitioned by
   `(year, month, region)` the columns end with `year, month, region`, which is the order Hive and Spark report.
-- Partitions are fetched when a table is scanned, once the query's filters are known, never while listing or
-  resolving tables. What the metastore returns is reused for `METADATA_CACHE_TTL` seconds.
+- Partitions are fetched when a table is scanned, once the query's filters are known, and once the keys of a join
+  are (see [Partitions selected by a join](#partitions-selected-by-a-join)), never while listing or resolving
+  tables. What the metastore returns is reused for `METADATA_CACHE_TTL` seconds.
 
 `PARTITION_MODE` controls this:
 
@@ -256,6 +260,37 @@ HMS Partition Fallback: no filter on the partition columns can be evaluated by t
 ```
 
 The debug log has one `hive_metastore partitions ... method=... selected=... filter="..."` line per scan.
+
+#### Partitions selected by a join
+
+A partitioned table joined on a partition column reads only the partitions the other side of the join can match:
+
+```sql
+SELECT f.store_id, sum(f.amount)
+FROM my_hms.sales.fact_sales f
+JOIN my_hms.sales.dim_date d ON f.sale_date = d.calendar_date
+WHERE d.fiscal_week = '2026-W30'
+GROUP BY f.store_id;
+```
+
+Planning a scan without a filter on partition columns fetches no partition list: the row estimate comes from the
+first 32 partitions and the table's partition count. When the scan starts, after the join has read the other side,
+DuckDB hands the join keys to the scan, as a list (up to `dynamic_or_filter_threshold` rows on the other side, 50 by
+default) or else as the range between the smallest and the largest key. The partitions are then selected from those
+keys the same way as from a filter in the query: by the metastore, or on the partition names, or among the partitions
+a filter in the query already selected. Only the selected partitions are listed and read. `EXPLAIN ANALYZE` shows
+`HMS Partitions: N (method, dynamic)`, and the debug log line ends with `dynamic=1`.
+
+The join keys come from DuckDB's own join filter pushdown, so they reach a scan when DuckDB pushes them:
+
+- for inner joins and semi-joins (`IN (SELECT ...)`) on `=`, `<`, `<=`, `>`, `>=`, with the partitioned table on the
+  probe side; not for a correlated `EXISTS` (DuckDB joins on `IS NOT DISTINCT FROM` there), outer joins, or a join
+  that spills to disk;
+- for Parquet tables. DuckDB's CSV scan and the Avro extension take no join filters, so those tables read every
+  partition the query's own filters leave (the rows are the same either way).
+
+`SET dynamic_or_filter_threshold = N` raises the number of keys passed as a list; `SET disabled_optimizers =
+'join_filter_pushdown'` or `DYNAMIC_PARTITION_PRUNING false` turns it off.
 
 Limits:
 

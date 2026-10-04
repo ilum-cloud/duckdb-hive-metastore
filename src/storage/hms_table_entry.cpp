@@ -394,6 +394,10 @@ TableFunction HMSTableEntry::GetScanFunction(ClientContext &context, unique_ptr<
 		    std::move(partition_cache), std::move(column_names), std::move(column_types), bind_to_table_columns);
 		scan_function.get_multi_file_reader = HMSMultiFileReader::CreateInstance;
 		scan_function.to_string = HMSScanToString;
+		// EXPLAIN ANALYZE adds what the scan finally read, the partitions join filters selected among them
+		scan_function.function_info->Cast<HMSScanFunctionInfo>().base_dynamic_to_string =
+		    scan_function.dynamic_to_string;
+		scan_function.dynamic_to_string = HMSScanDynamicToString;
 	}
 
 	// For CSV/Text tables, we must provide the schema to avoid type mismatch crashes

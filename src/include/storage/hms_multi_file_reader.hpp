@@ -22,7 +22,7 @@ static constexpr const char *HMS_PARTITION_VALUES_KEY = "hms_partition_values";
 struct HMSScanDiagnostics {
 	void Record(const HMSPartitionSelection &selection, idx_t selected);
 
-	mutex lock;
+	mutable mutex lock;
 	bool recorded = false;
 	HMSPartitionMethod method = HMSPartitionMethod::FULL;
 	idx_t selected = 0;
@@ -33,6 +33,8 @@ struct HMSScanDiagnostics {
 //! What EXPLAIN shows for the scan of a partitioned table: how its partitions were selected, if they were while
 //! planning. Never contacts the metastore.
 InsertionOrderPreservingMap<string> HMSScanToString(TableFunctionToStringInput &input);
+//! What EXPLAIN ANALYZE shows once the scan ran: how its partitions were selected in the end, by join filters too
+InsertionOrderPreservingMap<string> HMSScanDynamicToString(TableFunctionDynamicToStringInput &input);
 
 //! Carries what the multi-file reader DuckDB creates while binding the scan needs from the table entry: the table's
 //! partition metadata cache, and the entry's columns, which the scan must produce in exactly that order
@@ -51,6 +53,8 @@ struct HMSScanFunctionInfo : public TableFunctionInfo {
 	//! Whether the scan binds to these columns and matches files to them by name (files that name their columns),
 	//! rather than binding the format's own way and getting the partition columns appended (CSV)
 	bool bind_to_table_columns;
+	//! The format's own EXPLAIN ANALYZE details, which HMSScanDynamicToString adds to
+	table_function_dynamic_to_string_t base_dynamic_to_string = nullptr;
 };
 
 //! The files of one partitioned table, one partition at a time. Each partition is globbed at its own location, so
@@ -84,15 +88,23 @@ public:
 	                                                vector<unique_ptr<Expression>> &filters) const override;
 	//! Shows the partition locations rather than every expanded file; never selects the partitions
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
-	//! Estimates the rows left to scan from the metastore's statistics, or from the sizes of the data files
+	//! Estimates the rows left to scan from the metastore's statistics, or from the sizes of the data files. Before
+	//! the partitions are selected, from a sample of them: selecting them here would fetch every partition while the
+	//! query is planned, before join filters can narrow them down.
 	unique_ptr<NodeStatistics> GetCardinality(ClientContext &context) const override;
-	//! While the scan binds, answers without selecting the partitions: binding happens before the filters are known
+	//! Answers without selecting or listing partitions: DuckDB asks while binding, before the filters are known, and
+	//! again when the scan starts, of the list bound before join filters narrowed it
 	FileExpandResult GetExpandResult() const override;
 
-	//! The scan finished binding: from now on, a question about the files selects the partitions
-	void FinishBinding() const;
 	//! Whether the table turned out to have no partition registered, so the files under its location are read
 	bool ReadsTableLocation() const;
+	//! Selects the partitions the filters leave (if not done yet) and drops those whose values cannot satisfy them,
+	//! as a new list; null when nothing changes. `dynamic`: the filters are those a join pushed when the scan
+	//! started, recorded on the new list rather than on the scan's EXPLAIN details.
+	unique_ptr<HMSPartitionFileList> PushdownFilters(ClientContext &context, MultiFilePushdownInfo &info,
+	                                                 vector<unique_ptr<Expression>> &filters, bool dynamic) const;
+	//! How join filters selected this list's partitions, if they did
+	const HMSScanDiagnostics *DynamicSelection() const;
 
 protected:
 	bool ExpandNextPath() const override;
@@ -108,8 +120,15 @@ private:
 	void ListTogetherIfCheaper() const;
 	//! Lists the partitions from `position` on, several at once, and keeps the results for ExpandNextPath
 	void PrefetchFrom(idx_t position) const;
-	//! The data files of one partition, from its own listing
-	vector<OpenFileInfo> ListPartition(idx_t partition_index) const;
+	//! The data files of one partition, from its own listing; `keys_listed`: how many keys the listing returned
+	vector<OpenFileInfo> ListPartition(idx_t partition_index, idx_t &keys_listed) const;
+	//! Lists the table location once and keeps, for each of the given positions, the files of its partition
+	void ListPositionsTogether(const vector<idx_t> &positions) const;
+	//! Whether the partition at a position was listed together with the table location
+	bool IsListedTogether(idx_t position) const;
+	//! After the first partitions were listed one by one: lists the rest under the table location together when that
+	//! looks quicker, from how many keys the partitions listed so far held
+	void DecideAdaptiveListing(idx_t position) const;
 	//! Drops files that belong to a partition nested inside this one's location. A partial plan does not know every
 	//! location, so this fetches the complete one when a file lies deeper than the partition's own directory.
 	void DropNestedPartitionFiles(idx_t partition_index, vector<OpenFileInfo> &files) const;
@@ -128,7 +147,10 @@ private:
 	FileGlobInput glob_input;
 
 	mutable State state;
-	mutable bool binding;
+	//! The row estimate made before the partitions were selected
+	mutable optional_idx unresolved_estimate;
+	//! How join filters selected the partitions, for a list made when the scan started
+	mutable HMSScanDiagnostics dynamic_selection;
 	mutable shared_ptr<const HMSPartitionPlan> plan;
 	//! The partitions still to scan, as indexes into plan->partitions
 	mutable vector<idx_t> partition_indexes;
@@ -140,6 +162,11 @@ private:
 	//! partition_indexes, and which positions were listed that way
 	mutable vector<vector<OpenFileInfo>> listed_together;
 	mutable vector<bool> is_listed_together;
+	//! The partitions under the table location listed one by one so far, the keys their listings returned, and
+	//! whether listing the rest together was considered
+	mutable idx_t listed_partitions = 0;
+	mutable idx_t listed_keys = 0;
+	mutable bool adaptive_decided = false;
 	//! Listings done ahead, for positions [prefetched_from, prefetched_from + prefetched.size())
 	mutable vector<vector<OpenFileInfo>> prefetched;
 	mutable idx_t prefetched_from = 0;
@@ -172,6 +199,13 @@ public:
 	unique_ptr<MultiFileList> ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
 	                                                const MultiFileOptions &options, MultiFilePushdownInfo &info,
 	                                                vector<unique_ptr<Expression>> &filters) override;
+	//! When the scan starts: selects the partitions again with the filters a join pushed (hash join keys as an IN
+	//! list or a range), so only the partitions the join can match are listed and read
+	unique_ptr<MultiFileList> DynamicFilterPushdown(ClientContext &context, const MultiFileList &files,
+	                                                const MultiFileOptions &options, const vector<string> &names,
+	                                                const vector<LogicalType> &types,
+	                                                const vector<column_t> &column_ids,
+	                                                TableFilterSet &filters) override;
 	void FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
@@ -184,7 +218,8 @@ private:
 	//! is not present: the column is then read from the file itself.
 	vector<Value> ValuesForFile(ClientContext &context, const BaseFileReader &reader, vector<bool> &present) const;
 	//! Drops the files whose key=value path values cannot satisfy the filters (files under the table location)
-	unique_ptr<MultiFileList> PrunePathFiles(ClientContext &context, MultiFileList &files, MultiFilePushdownInfo &info,
+	unique_ptr<MultiFileList> PrunePathFiles(ClientContext &context, const MultiFileList &files,
+	                                         MultiFilePushdownInfo &info,
 	                                         vector<unique_ptr<Expression>> &filters) const;
 
 	shared_ptr<HMSPartitionCache> cache;

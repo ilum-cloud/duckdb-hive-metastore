@@ -59,6 +59,15 @@ enum class HMSPartitionMethod : uint8_t {
 
 const char *HMSPartitionMethodName(HMSPartitionMethod method);
 
+//! A few partitions of a table and how many it has, to estimate a scan's rows without fetching every partition
+struct HMSPartitionSample {
+	//! The first partitions (by name), or all of them when the plan is complete; null when the metastore could not
+	//! be asked
+	shared_ptr<const HMSPartitionPlan> plan;
+	//! How many partitions the table has, if known
+	optional_idx table_partitions;
+};
+
 struct HMSPartitionSelection {
 	HMSPartitionMethod method = HMSPartitionMethod::FULL;
 	//! The partitions to scan; null for PATH
@@ -81,6 +90,7 @@ public:
 	}
 	HMSPartitionMode Mode() const;
 	HMSPartitionFilterPushdown FilterPushdown() const;
+	bool DynamicPruning() const;
 
 	//! Every partition, or PATH when the table has none registered (errors in PARTITION_MODE 'hms')
 	HMSPartitionSelection ResolveAll(ClientContext &context);
@@ -95,6 +105,10 @@ public:
 	//! How many partitions the table has: from what is cached, else counted by the metastore. Invalid when the
 	//! metastore cannot tell.
 	optional_idx PartitionCount(ClientContext &context);
+	//! The first partitions of the table and how many it has, for a row estimate made before the partitions are
+	//! selected. A table with fewer partitions than the sample holds is fetched whole, and that list is kept as
+	//! the complete one.
+	HMSPartitionSample SampleForEstimate(ClientContext &context);
 
 	//! Builds a plan from partitions the metastore returned: locations normalized, values cast, sorted by name
 	shared_ptr<const HMSPartitionPlan> BuildPlan(ClientContext &context, vector<HMSAPIPartition> partitions,
@@ -144,6 +158,10 @@ private:
 	shared_ptr<const vector<string>> names;
 	time_point names_loaded_at;
 	idx_t names_generation = 0;
+	//! The first partitions of the table, kept for row estimates
+	shared_ptr<const HMSPartitionPlan> sample_plan;
+	time_point sample_plan_loaded_at;
+	idx_t sample_plan_generation = 0;
 	//! How many partitions the metastore counted
 	optional_idx partition_count;
 	time_point partition_count_loaded_at;
