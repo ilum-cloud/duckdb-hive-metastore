@@ -1,0 +1,13 @@
+# name: test/sql/security/external_access.test
+# description: ATTACH of a Hive Metastore follows enable_external_access
+# group: [security]
+
+require hive_metastore
+
+statement ok
+SET enable_external_access = false
+
+statement error
+ATTACH 'thrift://127.0.0.1:9083' AS hms (TYPE hive_metastore)
+----
+Attaching Hive Metastore catalogs is disabled through configuration

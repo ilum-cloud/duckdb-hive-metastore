@@ -1,6 +1,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
@@ -13,6 +14,10 @@ namespace duckdb {
 static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                             AttachedDatabase &db, const string &name, AttachInfo &info,
                                             AttachOptions &attach_options) {
+	// A locked-down session (enable_external_access = false) must not reach new metastores; catalogs attached before the lockdown keep working.
+	if (!Settings::Get<EnableExternalAccessSetting>(context)) {
+		throw PermissionException("Attaching Hive Metastore catalogs is disabled through configuration");
+	}
 	string default_schema;
 	string warehouse_location;
 	idx_t metadata_cache_ttl_seconds = HMSCatalog::DEFAULT_METADATA_CACHE_TTL_SECONDS;
