@@ -594,7 +594,8 @@ static idx_t EstimateFromSample(const HMSPartitionPlan &sample, idx_t table_part
 			rows += static_cast<double>(partition.row_count.GetIndex());
 			known++;
 		} else if (partition.total_size.IsValid()) {
-			rows += static_cast<double>(partition.total_size.GetIndex() / ESTIMATED_BYTES_PER_ROW);
+			idx_t estimated_rows = partition.total_size.GetIndex() / ESTIMATED_BYTES_PER_ROW;
+			rows += static_cast<double>(estimated_rows);
 			known++;
 		}
 	}
