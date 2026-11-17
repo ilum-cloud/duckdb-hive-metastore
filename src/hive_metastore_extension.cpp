@@ -14,7 +14,8 @@ namespace duckdb {
 static unique_ptr<Catalog> HMSCatalogAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                             AttachedDatabase &db, const string &name, AttachInfo &info,
                                             AttachOptions &attach_options) {
-	// A locked-down session (enable_external_access = false) must not reach new metastores; catalogs attached before the lockdown keep working.
+	// A locked-down session (enable_external_access = false) must not reach new metastores. Catalogs attached before
+	// the lockdown keep working.
 	if (!Settings::Get<EnableExternalAccessSetting>(context)) {
 		throw PermissionException("Attaching Hive Metastore catalogs is disabled through configuration");
 	}
