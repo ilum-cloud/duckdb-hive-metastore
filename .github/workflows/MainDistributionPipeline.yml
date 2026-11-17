@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq build-essential cmake ninja-build ccache git linux-libc-dev flex bison libcurl4-openssl-dev libssl-dev libthrift-dev thrift-compiler
+          sudo apt-get install -y -qq build-essential cmake ninja-build ccache git linux-libc-dev flex bison libcurl4-openssl-dev libssl-dev libthrift-dev libboost-dev thrift-compiler
 
       - name: Cache ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -83,7 +83,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq build-essential cmake ninja-build ccache git linux-libc-dev flex bison libcurl4-openssl-dev libssl-dev libthrift-dev thrift-compiler
+          sudo apt-get install -y -qq build-essential cmake ninja-build ccache git linux-libc-dev flex bison libcurl4-openssl-dev libssl-dev libthrift-dev libboost-dev thrift-compiler
 
       - name: Cache ccache
         uses: hendrikmuhs/ccache-action@v1.2
